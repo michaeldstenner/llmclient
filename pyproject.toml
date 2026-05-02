@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmclient"
+version = "0.1.0"
+description = "Thin multi-provider LLM client (Anthropic, OpenAI-compatible, Ollama)"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "Michael Stenner", email = "mstenner@gmail.com"}]
+
+[tool.setuptools.packages.find]
+where = ["."]
