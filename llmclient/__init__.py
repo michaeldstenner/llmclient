@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 import threading
 
 
@@ -33,6 +33,22 @@ class LLMResult:
     response_tokens: int | None
 
 
+@dataclass(frozen=True)
+class EmbedResult:
+    vector:          list[float] | None
+    outcome:         str
+    total_s:         float
+    queue_wait_s:    float
+    call_s:          float
+    load_s:          float
+    prompt_chars:    int
+    prompt_tokens:   int | None
+    # write_log() compatibility fields
+    response_chars:  int = 0
+    inference_s:     float = 0.0
+    response_tokens: int | None = None
+
+
 class LLMClient:
     def __init__(
         self,
@@ -46,6 +62,10 @@ class LLMClient:
         self._url     = resolve_url(cfg.provider, cfg.url)
         self._api_key = resolve_api_key(cfg.provider, cfg.api_key)
 
+    @property
+    def cfg(self) -> LLMConfig:
+        return self._cfg
+
     def call(
         self,
         user: str,
@@ -53,12 +73,20 @@ class LLMClient:
         *,
         operation: str = "call",
         context: dict | None = None,
+        extra_params: dict | None = None,
     ) -> LLMResult:
         from ._queue import acquire, release
         from .providers import dispatch
         from ._log import write_log
 
-        cfg          = self._cfg
+        cfg = (
+            _dc_replace(
+                self._cfg,
+                extra_params={**self._cfg.extra_params, **extra_params},
+            )
+            if extra_params
+            else self._cfg
+        )
         prompt_chars = len(system) + len(user)
 
         queue_wait_s = 0.0
@@ -96,6 +124,56 @@ class LLMClient:
             response_chars=len(pr.text) if pr.text else 0,
             prompt_tokens=pr.prompt_tokens,
             response_tokens=pr.response_tokens,
+        )
+        if cfg.log_caller:
+            write_log(cfg, operation, result, context)
+        return result
+
+    def embed(
+        self,
+        text: str,
+        *,
+        operation: str = "embed",
+        context: dict | None = None,
+    ) -> EmbedResult:
+        from ._queue import acquire, release
+        from .providers import dispatch_embed
+        from ._log import write_log
+
+        cfg          = self._cfg
+        prompt_chars = len(text)
+
+        queue_wait_s = 0.0
+        queue_id     = None
+        if cfg.queue_mode == "cooperative" and cfg.provider == "ollama":
+            queue_id, queue_wait_s = acquire(cfg, self._abort)
+            if queue_id is None:
+                result = EmbedResult(
+                    vector=None, outcome="aborted",
+                    total_s=round(queue_wait_s, 3),
+                    queue_wait_s=round(queue_wait_s, 3),
+                    call_s=0.0, load_s=0.0,
+                    prompt_chars=prompt_chars, prompt_tokens=None,
+                )
+                if cfg.log_caller:
+                    write_log(cfg, operation, result, context)
+                return result
+
+        try:
+            pr = dispatch_embed(text, cfg, self._url)
+        finally:
+            if queue_id is not None:
+                release(queue_id)
+
+        result = EmbedResult(
+            vector=pr.vector,
+            outcome=pr.outcome,
+            total_s=round(queue_wait_s + pr.call_s, 3),
+            queue_wait_s=round(queue_wait_s, 3),
+            call_s=round(pr.call_s, 3),
+            load_s=round(pr.load_s, 3),
+            prompt_chars=prompt_chars,
+            prompt_tokens=pr.prompt_tokens,
         )
         if cfg.log_caller:
             write_log(cfg, operation, result, context)

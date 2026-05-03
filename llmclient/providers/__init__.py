@@ -12,6 +12,15 @@ class _ProviderResult:
     response_tokens: int | None
 
 
+@dataclass
+class _EmbedProviderResult:
+    vector:        list[float] | None
+    outcome:       str
+    call_s:        float
+    load_s:        float
+    prompt_tokens: int | None
+
+
 def dispatch(
     system: str,
     user: str,
@@ -35,4 +44,15 @@ def dispatch(
         outcome=f"unknown_provider:{provider!r}",
         call_s=0.0, inference_s=0.0, load_s=0.0,
         prompt_tokens=None, response_tokens=None,
+    )
+
+
+def dispatch_embed(text: str, cfg, resolved_url: str) -> _EmbedProviderResult:
+    if cfg.provider == "ollama":
+        from .ollama import embed_ollama
+        return embed_ollama(text, cfg, resolved_url)
+    return _EmbedProviderResult(
+        vector=None,
+        outcome=f"embed_unsupported:{cfg.provider!r}",
+        call_s=0.0, load_s=0.0, prompt_tokens=None,
     )
