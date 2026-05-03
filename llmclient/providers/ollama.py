@@ -8,6 +8,8 @@ import urllib.error
 
 from . import _ProviderResult
 
+_ABORT_CHECK_S = 1.0   # patched to a small value in tests
+
 
 def _check_ollama_busy(base_url: str, model: str) -> bool:
     """True if Ollama is reachable and this model is currently loaded."""
@@ -78,7 +80,7 @@ def call_ollama(
     t = threading.Thread(target=_do_request, daemon=True)
     t.start()
     while t.is_alive():
-        t.join(1.0)
+        t.join(_ABORT_CHECK_S)
         if abort_event is not None and abort_event.is_set():
             call_s = time.monotonic() - t0
             return _ProviderResult(
@@ -93,7 +95,7 @@ def call_ollama(
         exc = result["error"]
         if isinstance(exc, (TimeoutError, socket.timeout)):
             if _check_ollama_busy(base_url, model):
-                outcome = f"timeout:model_loaded_but_slow"
+                outcome = "timeout:model_loaded_but_slow"
             else:
                 outcome = "timeout:model_not_loaded"
             return _ProviderResult(

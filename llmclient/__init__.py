@@ -74,7 +74,8 @@ class LLMClient:
                     prompt_chars=prompt_chars, response_chars=0,
                     prompt_tokens=None, response_tokens=None,
                 )
-                write_log(cfg, operation, result, context)
+                if cfg.log_caller:
+                    write_log(cfg, operation, result, context)
                 return result
 
         try:
@@ -96,7 +97,8 @@ class LLMClient:
             prompt_tokens=pr.prompt_tokens,
             response_tokens=pr.response_tokens,
         )
-        write_log(cfg, operation, result, context)
+        if cfg.log_caller:
+            write_log(cfg, operation, result, context)
         return result
 
     # ---------- convenience constructors ----------
