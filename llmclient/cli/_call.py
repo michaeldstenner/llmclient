@@ -1,14 +1,17 @@
+import dataclasses
+import json
 import sys
 from .. import LLMClient, LLMConfig
 
 
 def cmd_call(args) -> None:
-    prompt   = " ".join(args.prompt)
-    provider = args.provider
-    model    = args.model
-    system   = args.system
-    timeout  = args.timeout
-    no_queue = getattr(args, "no_queue", False)
+    prompt    = " ".join(args.prompt)
+    provider  = args.provider
+    model     = args.model
+    system    = args.system
+    timeout   = args.timeout
+    no_queue  = getattr(args, "no_queue", False)
+    emit_json = getattr(args, "json", False)
 
     queue_mode = "off" if no_queue else (
         "cooperative" if provider == "ollama" else "off"
@@ -23,8 +26,12 @@ def cmd_call(args) -> None:
     print(f"calling {provider}/{model}...", flush=True)
     result = client.call(prompt, system=system)
 
+    if emit_json:
+        print(json.dumps(dataclasses.asdict(result), indent=2))
+        return
+
     print()
-    if result.outcome == "success":
+    if result.is_success:
         print(result.text or "(empty response)")
     else:
         print(f"[{result.outcome}]", file=sys.stderr)

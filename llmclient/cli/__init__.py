@@ -22,6 +22,10 @@ def main() -> None:
         "--no-queue", action="store_true",
         help="bypass llmclient queue"
     )
+    p_call.add_argument(
+        "--json", action="store_true",
+        help="output full LLMResult as JSON"
+    )
 
     p_par = sub.add_parser(
         "parallel",

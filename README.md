@@ -63,10 +63,24 @@ LLMClient.ollama(model, *, abort_event=None, **cfg_kwargs)
 LLMClient.anthropic(model, *, abort_event=None, **cfg_kwargs)
 LLMClient.openai_compatible(model, *, abort_event=None, **cfg_kwargs)
 LLMClient.from_profile(provider, model, *, abort_event=None, **cfg_kwargs)
+LLMClient.from_dict(d, *, abort_event=None)
 ```
 
-`from_profile` sets `queue_mode="cooperative"` automatically for
-Ollama and `queue_mode="off"` for cloud providers.
+`from_profile` and `from_dict` set `queue_mode="cooperative"`
+automatically for Ollama and `queue_mode="off"` for cloud providers.
+
+`from_dict` accepts a flat dict (e.g. a YAML config stanza). `provider`
+is optional and inferred from `url` if absent (port 11434 or "ollama" in
+URL → `"ollama"`; `anthropic.com` → `"anthropic"`; anything else →
+`"openai_compatible"`). All `LLMConfig` fields are accepted as keys.
+
+```python
+client = LLMClient.from_dict({
+    'url':   'http://localhost:11434',
+    'model': 'qwen3:32b',
+    'extra_params': {'chat_template_kwargs': {'enable_thinking': False}},
+})
+```
 
 ### `client.call(user, system="", *, operation="call", context=None)`
 
@@ -96,6 +110,8 @@ Make a synchronous LLM call. Returns an `LLMResult`.
 | `queue_mode` | `"cooperative"` | `"cooperative"` \| `"off"` |
 | `priority` | 50 | Queue priority (higher runs first) |
 | `caller_max` | 4 | Max concurrent Ollama slots for this caller |
+| `retries` | 0 | Retry attempts on timeout / unreachable (0 = no retries) |
+| `retry_delay` | 15 | Seconds to wait between retries |
 | `extra_params` | `{}` | Pass-through to provider payload |
 
 `extra_params` keys recognised by providers: `temperature`, `max_tokens`,
@@ -118,6 +134,7 @@ Make a synchronous LLM call. Returns an `LLMResult`.
 | `response_chars` | int | `len(text)` or 0 on failure |
 | `prompt_tokens` | int \| None | From provider response body |
 | `response_tokens` | int \| None | From provider response body |
+| `is_success` | bool | `True` when `outcome == "success"` (property) |
 
 ---
 
@@ -270,11 +287,13 @@ def call_llm(tool_name, tool_input, cwd, config):
 A diagnostic and probe CLI installed as `llmc`:
 
 ```sh
-llmc status          # Ollama state, connections, queue
-llmc queue           # queue state only
-llmc call -m MODEL PROMPT          # single call, full timing
+llmc status                             # Ollama state, connections, queue
+llmc queue                              # queue state only
+llmc call -m MODEL PROMPT               # single call, full timing
+llmc call -m MODEL -s "system prompt" PROMPT
+llmc call -m MODEL --json PROMPT        # full LLMResult as JSON
 llmc call -p anthropic -m MODEL PROMPT
-llmc parallel -m MODEL -n 4 PROMPT # N concurrent calls
+llmc parallel -m MODEL -n 4 PROMPT     # N concurrent calls
 ```
 
 `llmc status` shows:

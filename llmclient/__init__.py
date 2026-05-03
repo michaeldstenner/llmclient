@@ -1,6 +1,9 @@
 from dataclasses import dataclass, field, replace as _dc_replace
 import threading
 
+_RETRYABLE = {"timeout", "timeout:model_loaded_but_slow",
+              "timeout:model_not_loaded", "error:unreachable"}
+
 
 @dataclass(frozen=True)
 class LLMConfig:
@@ -15,6 +18,8 @@ class LLMConfig:
     queue_mode:   str  = "cooperative"
     priority:     int  = 50
     caller_max:   int  = 4
+    retries:      int  = 0
+    retry_delay:  int  = 15
     extra_params: dict = field(default_factory=dict)
 
 
@@ -32,6 +37,10 @@ class LLMResult:
     prompt_tokens:   int | None
     response_tokens: int | None
 
+    @property
+    def is_success(self) -> bool:
+        return self.outcome == "success"
+
 
 @dataclass(frozen=True)
 class EmbedResult:
@@ -47,6 +56,19 @@ class EmbedResult:
     response_chars:  int = 0
     inference_s:     float = 0.0
     response_tokens: int | None = None
+
+    @property
+    def is_success(self) -> bool:
+        return self.outcome == "success"
+
+
+def _infer_provider(url: str) -> str:
+    u = url.lower()
+    if not u or "11434" in u or "ollama" in u:
+        return "ollama"
+    if "anthropic.com" in u:
+        return "anthropic"
+    return "openai_compatible"
 
 
 class LLMClient:
@@ -75,6 +97,7 @@ class LLMClient:
         context: dict | None = None,
         extra_params: dict | None = None,
     ) -> LLMResult:
+        import time
         from ._queue import acquire, release
         from .providers import dispatch
         from ._log import write_log
@@ -88,43 +111,52 @@ class LLMClient:
             else self._cfg
         )
         prompt_chars = len(system) + len(user)
+        attempts     = cfg.retries + 1
+        result       = None
 
-        queue_wait_s = 0.0
-        queue_id     = None
-        if cfg.queue_mode == "cooperative" and cfg.provider == "ollama":
-            queue_id, queue_wait_s = acquire(cfg, self._abort)
-            if queue_id is None:
-                result = LLMResult(
-                    text=None, outcome="aborted",
-                    total_s=round(queue_wait_s, 3),
-                    queue_wait_s=round(queue_wait_s, 3),
-                    call_s=0.0, inference_s=0.0, load_s=0.0,
-                    prompt_chars=prompt_chars, response_chars=0,
-                    prompt_tokens=None, response_tokens=None,
+        for attempt in range(attempts):
+            if attempt > 0:
+                time.sleep(cfg.retry_delay)
+
+            queue_wait_s = 0.0
+            queue_id     = None
+            if cfg.queue_mode == "cooperative" and cfg.provider == "ollama":
+                queue_id, queue_wait_s = acquire(cfg, self._abort)
+                if queue_id is None:
+                    result = LLMResult(
+                        text=None, outcome="aborted",
+                        total_s=round(queue_wait_s, 3),
+                        queue_wait_s=round(queue_wait_s, 3),
+                        call_s=0.0, inference_s=0.0, load_s=0.0,
+                        prompt_chars=prompt_chars, response_chars=0,
+                        prompt_tokens=None, response_tokens=None,
+                    )
+                    break
+
+            try:
+                pr = dispatch(
+                    system, user, cfg, self._url, self._api_key, self._abort
                 )
-                if cfg.log_caller:
-                    write_log(cfg, operation, result, context)
-                return result
+            finally:
+                if queue_id is not None:
+                    release(queue_id)
 
-        try:
-            pr = dispatch(system, user, cfg, self._url, self._api_key, self._abort)
-        finally:
-            if queue_id is not None:
-                release(queue_id)
+            result = LLMResult(
+                text=pr.text,
+                outcome=pr.outcome,
+                total_s=round(queue_wait_s + pr.call_s, 3),
+                queue_wait_s=round(queue_wait_s, 3),
+                call_s=round(pr.call_s, 3),
+                inference_s=round(pr.inference_s, 3),
+                load_s=round(pr.load_s, 3),
+                prompt_chars=prompt_chars,
+                response_chars=len(pr.text) if pr.text else 0,
+                prompt_tokens=pr.prompt_tokens,
+                response_tokens=pr.response_tokens,
+            )
+            if result.outcome not in _RETRYABLE:
+                break
 
-        result = LLMResult(
-            text=pr.text,
-            outcome=pr.outcome,
-            total_s=round(queue_wait_s + pr.call_s, 3),
-            queue_wait_s=round(queue_wait_s, 3),
-            call_s=round(pr.call_s, 3),
-            inference_s=round(pr.inference_s, 3),
-            load_s=round(pr.load_s, 3),
-            prompt_chars=prompt_chars,
-            response_chars=len(pr.text) if pr.text else 0,
-            prompt_tokens=pr.prompt_tokens,
-            response_tokens=pr.response_tokens,
-        )
         if cfg.log_caller:
             write_log(cfg, operation, result, context)
         return result
@@ -232,5 +264,28 @@ class LLMClient:
         queue_mode = "cooperative" if provider == "ollama" else "off"
         return cls(
             LLMConfig(provider=provider, model=model, queue_mode=queue_mode, **kwargs),
+            abort_event=abort_event,
+        )
+
+    @classmethod
+    def from_dict(
+        cls,
+        d: dict,
+        *,
+        abort_event: threading.Event | None = None,
+    ) -> "LLMClient":
+        """Build a client from a flat config dict (e.g. a YAML stanza).
+
+        `provider` is optional and inferred from `url` if absent.
+        `queue_mode` defaults to "cooperative" for ollama, "off" otherwise.
+        All other LLMConfig fields can be supplied as keys.
+        """
+        d        = dict(d)
+        url      = d.get("url", "")
+        provider = d.pop("provider", None) or _infer_provider(url)
+        model    = d.pop("model")
+        d.setdefault("queue_mode", "cooperative" if provider == "ollama" else "off")
+        return cls(
+            LLMConfig(provider=provider, model=model, **d),
             abort_event=abort_event,
         )
