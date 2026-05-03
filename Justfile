@@ -6,3 +6,5 @@ test-fast:
 
 install:
     uv pip install -e ".[dev]"
+    sed -i '' 's|^import sys$|import sys\nsys.path.insert(0, "{{justfile_directory()}}")|' \
+        .venv/bin/llmc

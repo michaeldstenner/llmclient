@@ -265,6 +265,47 @@ def call_llm(tool_name, tool_input, cwd, config):
 
 ---
 
+## `llmc` CLI
+
+A diagnostic and probe CLI installed as `llmc`:
+
+```sh
+llmc status          # Ollama state, connections, queue
+llmc queue           # queue state only
+llmc call -m MODEL PROMPT          # single call, full timing
+llmc call -p anthropic -m MODEL PROMPT
+llmc parallel -m MODEL -n 4 PROMPT # N concurrent calls
+```
+
+`llmc status` shows:
+- Loaded Ollama models, context size, active slot count (N/MAX)
+- All direct connections to `:11434` grouped by process, with the
+  script path for Python/bash processes and saturation warnings
+- llmclient queue state
+
+`llmc parallel` bypasses the queue and sends N requests
+simultaneously, reporting per-request timing and overall speedup
+vs. serial — useful for verifying `OLLAMA_NUM_PARALLEL` is working.
+
+---
+
+## Context window ratchet
+
+When `num_ctx_auto=True`, the Ollama provider queries `/api/ps`
+before sending a request and applies an upward-only ratchet:
+
+```
+effective_num_ctx = max(computed_num_ctx, loaded_ctx)
+```
+
+This prevents bouncer-style short-prompt callers from requesting a
+smaller context than what is already loaded, which would force Ollama
+to reload the model and block behind any in-progress inference at
+the larger size. The ratchet resets naturally when all models unload
+during idle periods.
+
+---
+
 ## Running tests
 
 ```sh

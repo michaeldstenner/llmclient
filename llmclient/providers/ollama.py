@@ -23,6 +23,23 @@ def _check_ollama_busy(base_url: str, model: str) -> bool:
         return False
 
 
+def _get_loaded_ctx(base_url: str, model: str) -> int | None:
+    """Return the context_length of the currently loaded model, or None."""
+    try:
+        req = urllib.request.Request(base_url + "/api/ps")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+        prefix = model.split(":")[0]
+        for m in data.get("models", []):
+            name = m.get("model", "")
+            if name == model or name.startswith(prefix):
+                ctx = m.get("context_length")
+                return int(ctx) if ctx is not None else None
+    except Exception:
+        pass
+    return None
+
+
 def call_ollama(
     system: str,
     user: str,
@@ -52,6 +69,14 @@ def call_ollama(
         options["num_ctx"] = max(4096, 2 ** math.ceil(math.log2(max(required, 2))))
     elif "num_ctx" in cfg.extra_params:
         options["num_ctx"] = cfg.extra_params["num_ctx"]
+
+    # Upward-only ratchet: never request a smaller context than what's
+    # already loaded — a smaller request forces Ollama to reload the
+    # model, blocking behind any in-progress inference at the larger size.
+    if "num_ctx" in options:
+        loaded_ctx = _get_loaded_ctx(base_url, model)
+        if loaded_ctx is not None:
+            options["num_ctx"] = max(options["num_ctx"], loaded_ctx)
 
     payload = {
         "model":      model,
