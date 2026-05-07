@@ -13,6 +13,10 @@ authors = [{name = "Michael Stenner", email = "mstenner@gmail.com"}]
 [project.scripts]
 llmc = "llmclient.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/michaeldstenner/llmclient"
+Repository = "https://github.com/michaeldstenner/llmclient"
+
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 

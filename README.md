@@ -47,7 +47,7 @@ client = LLMClient.openai_compatible(
 uv pip install -e /path/to/llmclient
 
 # As a path dependency in another uv project
-uv add git+file:///Users/mstenner/Code/llmclient
+uv add git+https://github.com/michaeldstenner/llmclient
 ```
 
 ---
