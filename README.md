@@ -1,10 +1,7 @@
 # llmclient
 
-Thin, stdlib-only Python library for calling local and cloud LLMs
-from personal daemon-style tools. Extracted from
-[bouncer](https://github.com/michaeldstenner/bouncer)'s providers
-architecture; generalises across the whole stack (bouncer, watchdog,
-squirrel, and future projects).
+Thin, stdlib-only Python library for calling local and cloud LLMs.
+Supports Ollama, Anthropic, and any OpenAI-compatible endpoint.
 
 Zero runtime dependencies. Python 3.11+.
 
@@ -16,7 +13,7 @@ Zero runtime dependencies. Python 3.11+.
 from llmclient import LLMClient
 
 # Ollama (local)
-client = LLMClient.ollama("qwen3:14b", log_caller="mytool")
+client = LLMClient.ollama("qwen3:14b", log_caller="myapp")
 result = client.call(
     user="What is 2 + 2?",
     system="Reply with only the number.",
@@ -28,7 +25,7 @@ print(result.inference_s) # time spent on token generation
 # Anthropic
 client = LLMClient.anthropic(
     "claude-haiku-4-5-20251001",
-    log_caller="mytool",
+    log_caller="myapp",
 )
 
 # OpenAI-compatible (LM Studio, Groq, etc.)
@@ -46,7 +43,7 @@ client = LLMClient.openai_compatible(
 # From the local repo (editable)
 uv pip install -e /path/to/llmclient
 
-# As a path dependency in another uv project
+# As a git dependency in another uv project
 uv add git+https://github.com/michaeldstenner/llmclient
 ```
 
@@ -173,7 +170,7 @@ When `log_caller` is set, one line is appended to
 ```json
 {
   "timestamp":        "2026-05-02T19:46:46.121",
-  "caller":           "watchdog",
+  "caller":           "myapp",
   "operation":        "classify",
   "provider":         "ollama",
   "model":            "qwen3:14b",
@@ -192,19 +189,18 @@ When `log_caller` is set, one line is appended to
 }
 ```
 
-`elapsed_s` is `queue_wait_s + call_s` (total wall-clock), matching the
-base schema defined in `agent_tools/docs/llm-call-logging.md`.
+`elapsed_s` is `queue_wait_s + call_s` (total wall-clock).
 
 Quick diagnostics:
 
 ```sh
 # All calls with timing, newest-last
-tail -50 ~/.local/share/bouncer/llm_calls.jsonl \
+tail -50 ~/.local/share/myapp/llm_calls.jsonl \
   | jq -r '[.timestamp,.outcome,.elapsed_s,.inference_s,.load_s] | @tsv'
 
 # Only failures
 jq 'select(.outcome != "success")' \
-  ~/.local/share/watchdog/llm_calls.jsonl
+  ~/.local/share/myapp/llm_calls.jsonl
 ```
 
 ---
@@ -213,16 +209,15 @@ jq 'select(.outcome != "success")' \
 
 When `queue_mode="cooperative"` (default for Ollama), calls enter a
 shared SQLite queue at `~/.local/share/llmclient/queue.db` and wait
-until a slot is free. This prevents silent pileup inside Ollama when
-multiple daemons (bouncer, watchdog, squirrel) call the same instance.
+until a slot is free. This prevents silent pileup when multiple
+processes share the same Ollama instance.
 
-**Recommended per-caller config:**
+Example priority configuration for two callers:
 
 | Caller | `priority` | `caller_max` |
 |--------|-----------|-------------|
-| bouncer | 100 | 4 |
-| watchdog | 10 | 1 |
-| squirrel | 10 | 1 |
+| interactive | 100 | 4 |
+| background  | 10  | 1 |
 
 Promotion rules (all atomic, inside `BEGIN IMMEDIATE`):
 
@@ -234,51 +229,6 @@ Promotion rules (all atomic, inside `BEGIN IMMEDIATE`):
 
 Pass an `abort_event: threading.Event` to `LLMClient` to cancel
 waiting or mid-inference — the result will have `outcome="aborted"`.
-
----
-
-## Migrating from bouncer providers
-
-The old signature in bouncer's `providers/__init__.py`:
-
-```python
-call_llm(tool_name, tool_input, cwd, config)
-  -> (decision, reason, prompt_chars)
-```
-
-New signature:
-
-```python
-client.call(user, system)
-  -> LLMResult   # .text, .outcome, .total_s, ...
-```
-
-Bouncer keeps its own `_build_prompt` / `_parse_llm_text` logic.
-The migration wrapper looks like:
-
-```python
-from llmclient import LLMClient, LLMConfig
-
-def call_llm(tool_name, tool_input, cwd, config):
-    cfg = LLMConfig(
-        provider=config["llm"]["provider"],
-        model=config["llm"]["model"],
-        timeout=config["llm"].get("timeout", 25),
-        log_caller="bouncer",
-        priority=100,
-        caller_max=4,
-    )
-    system_text, user_text = _build_prompt(tool_name, tool_input, cwd, config)
-    result = LLMClient(cfg, abort_event=ABORT_EVENT).call(
-        user=user_text,
-        system=system_text,
-        operation="classify",
-        context={"cwd": str(cwd), "tool": tool_name},
-    )
-    if result.text is None:
-        return None, result.outcome, len(system_text) + len(user_text)
-    return _parse_llm_text(result.text) + (result.prompt_chars,)
-```
 
 ---
 
@@ -317,11 +267,11 @@ before sending a request and applies an upward-only ratchet:
 effective_num_ctx = max(computed_num_ctx, loaded_ctx)
 ```
 
-This prevents bouncer-style short-prompt callers from requesting a
-smaller context than what is already loaded, which would force Ollama
-to reload the model and block behind any in-progress inference at
-the larger size. The ratchet resets naturally when all models unload
-during idle periods.
+This prevents short-prompt callers from requesting a smaller context
+than what is already loaded, which would force Ollama to reload the
+model and block behind any in-progress inference at the larger size.
+The ratchet resets naturally when all models unload during idle
+periods.
 
 ---
 
