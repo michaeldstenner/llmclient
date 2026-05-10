@@ -101,7 +101,18 @@ def _queue_rows() -> list[dict]:
         return []
 
 
-def _process_detail(pid: int) -> str:
+def _ppid(pid: int) -> int | None:
+    try:
+        r = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "ppid="],
+            capture_output=True, text=True,
+        )
+        return int(r.stdout.strip())
+    except Exception:
+        return None
+
+
+def _process_detail(pid: int, _depth: int = 0) -> str:
     """
     Return a human-readable description of what a PID is running.
     For Python/bash/zsh: show the script, not the interpreter.
@@ -122,24 +133,37 @@ def _process_detail(pid: int) -> str:
     parts = cmd.split()
     exe   = Path(parts[0]).name if parts else ""
 
-    # Python: show the script / -m module, strip the interpreter
-    if exe in ("python", "python3") or exe.startswith("python3."):
+    # Python: handles lowercase (python, python3, python3.X) and the
+    # macOS framework binary named "Python" (capital P).
+    _is_python = (
+        exe in ("python", "python3", "Python")
+        or exe.startswith("python3.")
+        or exe.startswith("Python3.")
+    )
+    if _is_python:
         rest = parts[1:]
-        if not rest:
-            return cmd
-        if rest[0] == "-m":
+        if not rest and _depth < 2:
+            ppid = _ppid(pid)
+            return _process_detail(ppid, _depth + 1) if ppid else cmd
+        if rest and rest[0] == "-c":
+            snippet = rest[1][:60] if len(rest) > 1 else ""
+            return f"-c {snippet!r}"
+        if rest and rest[0] == "-m":
             return " ".join(rest[:2])
-        if rest[0].startswith("-"):
+        if rest and rest[0].startswith("-"):
             # flags before script; find first non-flag arg
-            for i, a in enumerate(rest):
+            for a in rest:
                 if not a.startswith("-"):
-                    return " ".join([a] + rest[i+1:i+4])
+                    return Path(a).name
+            if _depth < 2:
+                ppid = _ppid(pid)
+                return (
+                    _process_detail(ppid, _depth + 1) if ppid else cmd
+                )
             return cmd
-        # rest[0] is the script path
-        script = rest[0]
-        trailer = " ".join(rest[1:4])
-        label = str(Path(script))
-        return f"{label} {trailer}".strip()
+        if rest:
+            return Path(rest[0]).name
+        return cmd
 
     # bash / zsh / sh: show -c snippet or script name
     if exe in ("bash", "zsh", "sh"):
@@ -149,7 +173,7 @@ def _process_detail(pid: int) -> str:
             return f"-c {snippet!r}"
         for a in rest:
             if not a.startswith("-"):
-                return a
+                return Path(a).name
         return cmd
 
     # ollama run: show model name
