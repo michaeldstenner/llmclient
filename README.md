@@ -59,6 +59,7 @@ The main class. Convenience constructors are usually cleaner:
 LLMClient.ollama(model, *, abort_event=None, **cfg_kwargs)
 LLMClient.anthropic(model, *, abort_event=None, **cfg_kwargs)
 LLMClient.openai_compatible(model, *, abort_event=None, **cfg_kwargs)
+LLMClient.claude_code(model="", *, abort_event=None, **cfg_kwargs)
 LLMClient.from_profile(provider, model, *, abort_event=None, **cfg_kwargs)
 LLMClient.from_dict(d, *, abort_event=None)
 ```
@@ -96,7 +97,7 @@ Make a synchronous LLM call. Returns an `LLMResult`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `provider` | — | `"ollama"` \| `"anthropic"` \| `"openai"` \| `"openai_compatible"` |
+| `provider` | — | `"ollama"` \| `"anthropic"` \| `"openai"` \| `"openai_compatible"` \| `"claude_code"` |
 | `model` | — | Model identifier as configured |
 | `url` | (resolved) | Base URL; resolved from `keys.yaml` if empty |
 | `timeout` | 60 | Request timeout in seconds |
@@ -112,7 +113,15 @@ Make a synchronous LLM call. Returns an `LLMResult`.
 | `extra_params` | `{}` | Pass-through to provider payload |
 
 `extra_params` keys recognised by providers: `temperature`, `max_tokens`,
-`num_predict`, `num_ctx`, `keep_alive`, `timeout`.
+`num_predict`, `num_ctx`, `keep_alive`, `timeout`, `tools` (claude_code
+only — passed as `--tools` to the CLI).
+
+The `claude_code` provider shells out to `claude --print` rather than
+hitting the API directly, so it uses your Claude subscription rather
+than per-token API billing. The `claude` binary is resolved via the
+`LLMCLIENT_CLAUDE_BIN` env var, `PATH`, or `~/.local/bin/claude`. The
+`model` field maps to `--model`; leave it empty to use Claude Code's
+configured default. `url` and `api_key` are ignored.
 
 ---
 
