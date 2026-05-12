@@ -253,6 +253,19 @@ class LLMClient:
         )
 
     @classmethod
+    def claude_code(
+        cls,
+        model: str = "",
+        *,
+        abort_event: threading.Event | None = None,
+        **kwargs,
+    ) -> "LLMClient":
+        return cls(
+            LLMConfig(provider="claude_code", model=model, queue_mode="off", **kwargs),
+            abort_event=abort_event,
+        )
+
+    @classmethod
     def from_profile(
         cls,
         provider: str,
