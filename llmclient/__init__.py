@@ -192,7 +192,7 @@ class LLMClient:
                 return result
 
         try:
-            pr = dispatch_embed(text, cfg, self._url)
+            pr = dispatch_embed(text, cfg, self._url, self._api_key)
         finally:
             if queue_id is not None:
                 release(queue_id)

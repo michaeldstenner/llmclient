@@ -4,7 +4,7 @@ import time
 import urllib.request
 import urllib.error
 
-from . import _ProviderResult
+from . import _EmbedProviderResult, _ProviderResult
 
 
 def _extract_text(body: dict) -> str:
@@ -114,3 +114,60 @@ def call_openai(
             call_s=call_s, inference_s=0.0, load_s=0.0,
             prompt_tokens=None, response_tokens=None,
         )
+
+
+def embed_openai(
+    text: str,
+    cfg,
+    base_url: str,
+    api_key: str,
+) -> _EmbedProviderResult:
+    model   = cfg.model
+    timeout = int(cfg.extra_params.get("timeout", cfg.timeout))
+    payload = {"model": model, "input": text}
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    t0 = time.monotonic()
+    try:
+        req = urllib.request.Request(
+            base_url + "/v1/embeddings",
+            data=json.dumps(payload).encode(),
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read())
+    except (TimeoutError, socket.timeout):
+        return _EmbedProviderResult(
+            vector=None, outcome="timeout",
+            call_s=time.monotonic() - t0, load_s=0.0, prompt_tokens=None,
+        )
+    except urllib.error.HTTPError as exc:
+        return _EmbedProviderResult(
+            vector=None, outcome=f"http_{exc.code}",
+            call_s=time.monotonic() - t0, load_s=0.0, prompt_tokens=None,
+        )
+    except urllib.error.URLError:
+        return _EmbedProviderResult(
+            vector=None, outcome="error:unreachable",
+            call_s=time.monotonic() - t0, load_s=0.0, prompt_tokens=None,
+        )
+    except Exception as exc:
+        return _EmbedProviderResult(
+            vector=None, outcome=f"error:{exc}",
+            call_s=time.monotonic() - t0, load_s=0.0, prompt_tokens=None,
+        )
+
+    call_s = time.monotonic() - t0
+    data = body.get("data", [])
+    item = data[0] if data else {}
+    vector = item.get("embedding") if isinstance(item, dict) else None
+    usage = body.get("usage", {})
+    return _EmbedProviderResult(
+        vector=vector,
+        outcome="success" if vector is not None else "error:empty_response",
+        call_s=call_s,
+        load_s=0.0,
+        prompt_tokens=usage.get("prompt_tokens"),
+    )

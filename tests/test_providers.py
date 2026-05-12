@@ -19,7 +19,7 @@ import pytest
 
 from llmclient.providers.ollama import call_ollama
 from llmclient.providers.anthropic import call_anthropic
-from llmclient.providers.openai import call_openai, _extract_text
+from llmclient.providers.openai import call_openai, embed_openai, _extract_text
 from tests.conftest import make_cfg, mock_urlopen, mock_urlopen_timeout
 from tests.conftest import mock_urlopen_http_error, mock_urlopen_url_error
 
@@ -260,10 +260,16 @@ OPENAI_SUCCESS_BODY = {
     "usage": {"prompt_tokens": 15, "completion_tokens": 3},
 }
 
+OPENAI_EMBED_BODY = {
+    "data": [{"object": "embedding", "embedding": [0.1, 0.2, 0.3]}],
+    "usage": {"prompt_tokens": 4},
+}
+
 
 def _openai_cfg(**kw):
+    model = kw.pop("model", "gpt-4o-mini")
     return make_cfg(
-        provider="openai_compatible", model="gpt-4o-mini",
+        provider="openai_compatible", model=model,
         url="https://api.openai.com", api_key="sk-test", **kw
     )
 
@@ -335,6 +341,42 @@ def test_openai_url_error():
     with mock_urlopen_url_error():
         r = call_openai("s", "u", cfg, "https://api.openai.com", "k")
     assert r.outcome == "error:unreachable"
+
+
+def test_openai_embed_success():
+    cfg = _openai_cfg(model="text-embedding-3-small")
+    with mock_urlopen(OPENAI_EMBED_BODY):
+        r = embed_openai("hello", cfg, "https://api.openai.com", "sk-test")
+    assert r.outcome == "success"
+    assert r.vector == [0.1, 0.2, 0.3]
+    assert r.prompt_tokens == 4
+
+
+def test_openai_embed_payload_and_auth():
+    captured: dict = {}
+
+    def capture(req, timeout=None):
+        captured["payload"] = json.loads(req.data)
+        captured["auth"] = req.headers.get("Authorization")
+        return MagicMock(
+            read=lambda: json.dumps(OPENAI_EMBED_BODY).encode(),
+            __enter__=lambda s: s,
+            __exit__=MagicMock(return_value=False),
+        )
+
+    cfg = _openai_cfg(model="embed-model")
+    with patch("urllib.request.urlopen", side_effect=capture):
+        embed_openai("hello", cfg, "https://api.openai.com", "sk-test")
+
+    assert captured["payload"] == {"model": "embed-model", "input": "hello"}
+    assert captured["auth"] == "Bearer sk-test"
+
+
+def test_openai_embed_http_429():
+    cfg = _openai_cfg(model="text-embedding-3-small")
+    with mock_urlopen_http_error(429):
+        r = embed_openai("hello", cfg, "https://api.openai.com", "sk-test")
+    assert r.outcome == "http_429"
 
 
 # ---------------------------------------------------------------------------

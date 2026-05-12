@@ -50,10 +50,18 @@ def dispatch(
     )
 
 
-def dispatch_embed(text: str, cfg, resolved_url: str) -> _EmbedProviderResult:
+def dispatch_embed(
+    text: str,
+    cfg,
+    resolved_url: str,
+    resolved_api_key: str,
+) -> _EmbedProviderResult:
     if cfg.provider == "ollama":
         from .ollama import embed_ollama
         return embed_ollama(text, cfg, resolved_url)
+    if cfg.provider in ("openai", "openai_compatible"):
+        from .openai import embed_openai
+        return embed_openai(text, cfg, resolved_url, resolved_api_key)
     return _EmbedProviderResult(
         vector=None,
         outcome=f"embed_unsupported:{cfg.provider!r}",
