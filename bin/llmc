@@ -1,0 +1,4 @@
+#!/bin/zsh
+# Invoke llmc via uv run + python -m to bypass the com.apple.provenance
+# .pth-skipping issue in Python 3.13 + macOS Sequoia (see scratch/pth-xattr-issue.md).
+exec uv run --project "$(cd "$(dirname "$0")/.." && pwd)" python3 -m llmclient.cli "$@"
