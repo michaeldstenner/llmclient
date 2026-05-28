@@ -134,6 +134,17 @@ def test_crash_reaping(queue_db):
     assert _count(queue_db, "running") == 1
 
 
+def test_dead_waiting_rows_do_not_block_promotion(queue_db):
+    """Dead waiting rows must be reaped so they can't block live lower-priority callers."""
+    dead_pid = 999999
+    # Dead high-priority waiter — was blocking live lower-priority callers.
+    _insert(queue_db, pid=dead_pid, priority=50, caller="ghost")
+    live = _insert(queue_db, pid=os.getpid(), priority=10, caller="live")
+    # Before the fix: dead ghost row (priority=50) blocked live (priority=10).
+    assert _try_promote(live, "live", 10, 4, 4) is True
+    assert _count(queue_db, "waiting") == 0  # ghost reaped
+
+
 # ---------------------------------------------------------------------------
 # acquire / release
 # ---------------------------------------------------------------------------

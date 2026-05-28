@@ -76,9 +76,9 @@ def _try_promote(row_id: int, caller: str, priority: int,
     try:
         conn.execute("BEGIN IMMEDIATE")
 
-        # Reap processes whose PID is gone
+        # Reap processes whose PID is gone (both waiting and running)
         for rid, pid in conn.execute(
-            "SELECT id, pid FROM queue WHERE status='running'"
+            "SELECT id, pid FROM queue"
         ).fetchall():
             try:
                 os.kill(pid, 0)
