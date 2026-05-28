@@ -32,6 +32,9 @@ def write_log(cfg, operation: str, result, context: dict | None) -> None:
             "response_chars":    result.response_chars,
             "context":           context or {},
         }
+        snap = getattr(result, "queue_snapshot", None)
+        if snap:
+            entry["queue_snapshot"] = snap
         log_path = _log_path(cfg.log_caller)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as f:

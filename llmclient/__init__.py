@@ -18,9 +18,10 @@ class LLMConfig:
     keep_alive:   str  = "60m"
     num_ctx_auto: bool = True
     log_caller:   str  = ""
-    queue_mode:          str        = "cooperative"
-    queue_timeout:       float|None = None
-    priority:            int        = 50
+    queue_mode:           str        = "cooperative"
+    queue_timeout:        float|None = None
+    queue_stall_timeout:  float|None = None
+    priority:             int        = 50
     caller_max:          int        = 4
     first_token_timeout: int|None   = None
     generation_timeout:  int|None   = None
@@ -49,6 +50,7 @@ class LLMResult:
     response_chars:  int
     prompt_tokens:   int | None
     response_tokens: int | None
+    queue_snapshot:  list[dict] | None = None
 
     @property
     def is_success(self) -> bool:
@@ -151,10 +153,11 @@ class LLMClient:
             queue_wait_s = 0.0
             queue_id     = None
             if cfg.queue_mode == "cooperative" and cfg.provider == "ollama":
-                queue_id, queue_wait_s, queue_reason = acquire(cfg, self._abort)
+                queue_id, queue_wait_s, queue_reason, queue_snap = acquire(cfg, self._abort)
                 if queue_id is None:
                     outcome = (
-                        "aborted" if queue_reason == "aborted"
+                        "aborted"             if queue_reason == "aborted"
+                        else "timeout:queue_stall" if queue_reason == "queue_stalled"
                         else "timeout:queue_wait"
                     )
                     result = LLMResult(
@@ -164,6 +167,7 @@ class LLMClient:
                         call_s=0.0, inference_s=0.0, load_s=0.0,
                         prompt_chars=prompt_chars, response_chars=0,
                         prompt_tokens=None, response_tokens=None,
+                        queue_snapshot=queue_snap,
                     )
                     break
 
@@ -215,7 +219,7 @@ class LLMClient:
         queue_wait_s = 0.0
         queue_id     = None
         if cfg.queue_mode == "cooperative" and cfg.provider == "ollama":
-            queue_id, queue_wait_s, queue_reason = acquire(cfg, self._abort)
+            queue_id, queue_wait_s, queue_reason, _snap = acquire(cfg, self._abort)
             if queue_id is None:
                 outcome = (
                     "aborted" if queue_reason == "aborted"

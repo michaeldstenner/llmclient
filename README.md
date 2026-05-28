@@ -107,6 +107,7 @@ Make a synchronous LLM call. Returns an `LLMResult`.
 | `log_caller` | `""` | Caller name for JSONL log; empty = no logging |
 | `queue_mode` | `"cooperative"` | `"cooperative"` \| `"off"` |
 | `queue_timeout` | `None` | Seconds to wait in queue before giving up (`None` = unbounded) |
+| `queue_stall_timeout` | `None` | Seconds without any inference completing before declaring the queue frozen; produces `timeout:queue_stall` (`None` = disabled) |
 | `priority` | 50 | Queue priority (higher runs first) |
 | `caller_max` | 4 | Max concurrent Ollama slots for this caller |
 | `first_token_timeout` | `None` | Ollama streaming: seconds from HTTP send to first token; enables streaming when set |
@@ -142,7 +143,7 @@ configured default. `url` and `api_key` are ignored.
 | Field | Type | Description |
 |-------|------|-------------|
 | `text` | str \| None | Response text; None on failure |
-| `outcome` | str | `"success"` \| `"aborted"` \| `"circuit_open"` \| `"timeout:queue_wait"` \| `"timeout:first_token"` \| `"timeout:generation"` \| `"error:unreachable"` \| `"http_NNN"` \| `"error:…"` |
+| `outcome` | str | `"success"` \| `"aborted"` \| `"circuit_open"` \| `"timeout:queue_wait"` \| `"timeout:queue_stall"` \| `"timeout:first_token"` \| `"timeout:generation"` \| `"error:unreachable"` \| `"http_NNN"` \| `"error:…"` |
 | `total_s` | float | Wall-clock: `queue_wait_s + call_s` |
 | `queue_wait_s` | float | Time blocked waiting for an Ollama slot |
 | `call_s` | float | Time from HTTP send to response |
@@ -152,6 +153,7 @@ configured default. `url` and `api_key` are ignored.
 | `response_chars` | int | `len(text)` or 0 on failure |
 | `prompt_tokens` | int \| None | From provider response body |
 | `response_tokens` | int \| None | From provider response body |
+| `queue_snapshot` | list[dict] \| None | Queue state at timeout; present on `timeout:queue_wait` and `timeout:queue_stall`; each entry: `{id, pid, caller, priority, status, age_s, running_s}` |
 | `is_success` | bool | `True` when `outcome == "success"` (property) |
 
 ---
@@ -290,6 +292,10 @@ A diagnostic and probe CLI installed as `llmc`:
 ```sh
 llmc status                             # Ollama state, connections, queue
 llmc queue                              # queue state only
+llmc log                                # recent warn/error entries (last 5)
+llmc log --all --last 20                # all outcomes, last 20
+llmc log --caller bouncer               # filter to one caller
+llmc log --json                         # raw JSONL output
 llmc call -m MODEL PROMPT               # single call, full timing
 llmc call -m MODEL -s "system prompt" PROMPT
 llmc call -m MODEL --json PROMPT        # full LLMResult as JSON

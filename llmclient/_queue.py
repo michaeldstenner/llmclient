@@ -19,9 +19,15 @@ the circuit_state table.  States derived from (tripped_at, probe_pid):
   tripped_at NOT NULL, cooldown expired        → half-open (allow probe)
   tripped_at NOT NULL, probe_pid NOT NULL      → probing
 
+queue_meta: single-row bookkeeping, currently tracks last_release_at
+(timestamp of the most recent successful inference completion).  Used by
+the queue_stall_timeout health check to distinguish "busy but moving"
+from "completely frozen".
+
 All multi-step reads/writes happen inside BEGIN IMMEDIATE so only one
 process wins races when many poll simultaneously.
 """
+import logging
 import os
 import sqlite3
 import time
@@ -30,6 +36,7 @@ from pathlib import Path
 
 _DB_PATH   = Path.home() / ".local" / "share" / "llmclient" / "queue.db"
 _POLL_S    = 0.25
+_log       = logging.getLogger("llmclient.queue")
 
 _CREATE_QUEUE = """
 CREATE TABLE IF NOT EXISTS queue (
@@ -55,6 +62,13 @@ CREATE TABLE IF NOT EXISTS circuit_state (
 )
 """
 
+_CREATE_META = """
+CREATE TABLE IF NOT EXISTS queue_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+)
+"""
+
 
 def _open() -> sqlite3.Connection:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -62,6 +76,7 @@ def _open() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(_CREATE_QUEUE)
     conn.execute(_CREATE_CIRCUIT)
+    conn.execute(_CREATE_META)
     return conn
 
 
@@ -143,15 +158,43 @@ def _delete_row(row_id: int) -> None:
         conn.close()
 
 
+def _read_queue_state() -> list[dict]:
+    """Return a snapshot of all queue rows for diagnostics."""
+    conn = _open()
+    try:
+        rows = conn.execute(
+            "SELECT id, pid, caller, priority, status, submitted_at, started_at "
+            "FROM queue ORDER BY submitted_at"
+        ).fetchall()
+        now = time.time()
+        return [
+            {
+                "id":        r[0],
+                "pid":       r[1],
+                "caller":    r[2],
+                "priority":  r[3],
+                "status":    r[4],
+                "age_s":     round(now - r[5], 1),
+                "running_s": round(now - r[6], 1) if r[6] else None,
+            }
+            for r in rows
+        ]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
 def acquire(
     cfg,
     abort_event: threading.Event | None,
-) -> tuple[int | None, float, str]:
+) -> tuple[int | None, float, str, list[dict] | None]:
     """Insert a queue row and wait until promoted.
 
-    Returns (queue_id, queue_wait_s, reason).
-    reason is "ok", "aborted", or "queue_timeout".
+    Returns (queue_id, queue_wait_s, reason, queue_snapshot).
+    reason is "ok", "aborted", "queue_timeout", or "queue_stalled".
     queue_id is None when reason != "ok".
+    queue_snapshot is populated on "queue_timeout" and "queue_stalled".
     """
     from ._keys import get_parallel_slots
 
@@ -172,21 +215,45 @@ def acquire(
     finally:
         conn.close()
 
-    t0       = time.monotonic()
-    qt       = cfg.queue_timeout
-    deadline = t0 + qt if qt is not None else None
+    t0            = time.monotonic()
+    qt            = cfg.queue_timeout
+    stall_t       = cfg.queue_stall_timeout
+    deadline      = t0 + qt if qt is not None else None
+    no_history_logged = False
+
     try:
         while True:
             if abort_event is not None and abort_event.is_set():
                 _delete_row(row_id)
-                return None, time.monotonic() - t0, "aborted"
+                return None, time.monotonic() - t0, "aborted", None
 
             if deadline is not None and time.monotonic() >= deadline:
+                snapshot = _read_queue_state()
                 _delete_row(row_id)
-                return None, time.monotonic() - t0, "queue_timeout"
+                return None, time.monotonic() - t0, "queue_timeout", snapshot
+
+            if stall_t is not None:
+                last_rel = _read_last_release()
+                if last_rel is None:
+                    # No completions in DB — fresh install or DB was reset.
+                    # Can't tell if stalled; skip stall check and rely on
+                    # queue_timeout as the hard ceiling.
+                    if not no_history_logged:
+                        _log.warning(
+                            "queue stall check skipped for caller=%r: "
+                            "no completion history in queue_meta "
+                            "(fresh install or DB reset) — "
+                            "queue_timeout hard ceiling still applies",
+                            caller,
+                        )
+                        no_history_logged = True
+                elif (time.time() - last_rel) > stall_t:
+                    snapshot = _read_queue_state()
+                    _delete_row(row_id)
+                    return None, time.monotonic() - t0, "queue_stalled", snapshot
 
             if _try_promote(row_id, caller, cfg.priority, cfg.caller_max, global_max):
-                return row_id, time.monotonic() - t0, "ok"
+                return row_id, time.monotonic() - t0, "ok", None
 
             time.sleep(_POLL_S)
     except Exception:
@@ -197,9 +264,43 @@ def acquire(
         raise
 
 
+def _read_last_release() -> float | None:
+    """Return the timestamp of the most recent inference completion, or None."""
+    conn = _open()
+    try:
+        row = conn.execute(
+            "SELECT value FROM queue_meta WHERE key='last_release_at'"
+        ).fetchone()
+        return float(row[0]) if row else None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 def release(queue_id: int) -> None:
-    """Remove the running row, freeing the slot."""
-    _delete_row(queue_id)
+    """Remove the running row, freeing the slot, and record completion time.
+
+    Writes last_release_at to queue_meta so stall-detection can distinguish
+    "queue is busy but moving" from "queue is frozen".
+    """
+    conn = _open()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM queue WHERE id=?", [queue_id])
+        conn.execute(
+            "INSERT OR REPLACE INTO queue_meta (key, value) "
+            "VALUES ('last_release_at', ?)",
+            [str(time.time())],
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
