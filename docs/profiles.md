@@ -1,19 +1,37 @@
 # llmclient Usage Profiles
 
-Three profiles cover the common caller scenarios.  Each is a set of
-`LLMConfig` field values (or equivalent YAML keys in bouncer-style
-configs).  Think of them as starting points — tune per-caller as needed.
+This document illustrates three common caller scenarios with example
+`LLMConfig` values.  **The specific numbers are illustrations, not
+directives.**  Every knob exists because callers genuinely differ: a
+hook that must complete in milliseconds has different needs than an
+overnight batch job, and both differ from an interactive tool where
+the user is staring at a spinner.
+
+Read this to understand *which settings matter for your scenario and
+why*.  Then choose values that fit your actual workload, error
+tolerance, and fallback strategy.  The right `queue_stall_timeout` for
+a one-shot CLI tool is not the same as the right value for a daemon
+that runs all night — and both are probably different from what's shown
+here.
+
+When in doubt, err toward generous timeouts.  A timeout that's too
+loose is annoying; a timeout that's too tight produces confusing
+failures that look like bugs.
 
 ---
 
-## The Three Profiles
+## Three Illustrative Scenarios
 
 ### Fail Fast
-*Interactive caller with a fallback path.*
+*Interactive caller with a fallback path — example values.*
 
 The LLM result is useful but not required — bouncer can ask the user,
 squirrel can fall back to text search, etc.  Getting a fast answer about
 failure is more valuable than waiting for a slow success.
+
+The values below assume a small-output classification task on a loaded
+model.  A caller with larger outputs, a slower model, or a heavier
+fallback cost should loosen the timeouts accordingly.
 
 | Setting | Value | Reason |
 |---|---|---|
@@ -42,10 +60,13 @@ circuit_cooldown_s:   60
 ---
 
 ### Hurry
-*Interactive caller, no fallback — the LLM result is the product.*
+*Interactive caller, no fallback — example values.*
 
-Waiting is better than failing, but we still want the result as soon as
-possible and should not hang forever if something goes wrong.
+The LLM result is the product; waiting is better than failing.  The
+values below are a reasonable starting point for a single-user tool.
+A caller with longer expected outputs should increase `generation_timeout`;
+one that needs tighter latency guarantees should decrease `queue_timeout`
+and accept more frequent fallback-to-error.
 
 | Setting | Value | Reason |
 |---|---|---|
@@ -73,13 +94,17 @@ circuit_cooldown_s:   45
 ---
 
 ### No Rush
-*Background batch processing — overnight syncs, email classification,
-podcast analysis, etc.*
+*Background batch processing — example values.*
 
 Individual calls have no urgency.  The job should yield to interactive
 work, tolerate Ollama being busy for hours, and retry transient failures
 automatically.  But it should still surface a clear signal if Ollama is
 completely dead for an extended period.
+
+The values below suit a job that runs overnight and doesn't need
+babysitting.  A shorter-lived batch job could tighten `queue_stall_timeout`
+considerably; a job processing very large contexts should increase
+`generation_timeout` to match.
 
 | Setting | Value | Reason |
 |---|---|---|
@@ -163,12 +188,17 @@ you genuinely want them to tie.
 
 ## Caller Reference
 
-| Caller | Profile | Notes |
-|---|---|---|
-| bouncer | Fail Fast | Fallback: ask user |
-| squirrel (search) | Fail Fast | Fallback: text search |
-| squirrel (sync) | No Rush | Overnight background |
-| watchdog | No Rush | Email classification |
-| pithos | No Rush | Podcast analysis |
+This table records what each caller is currently configured to do, as a
+convenience for cross-referencing.  It is not a prescription — callers
+should configure what actually makes sense for them, and update this
+table when they diverge from the example values above.
 
-*(Update this table as callers are added or reconfigured.)*
+| Caller | Scenario | Fallback |
+|---|---|---|
+| bouncer | Fail Fast | Ask user |
+| squirrel (search) | Fail Fast | Text search |
+| squirrel (sync) | No Rush | N/A — retries on next sync cycle |
+| watchdog | No Rush | N/A — next scheduled run |
+| pithos | No Rush | N/A — next scheduled run |
+
+*(Keep this table current as callers are added or reconfigured.)*
