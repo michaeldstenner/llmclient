@@ -1,5 +1,6 @@
 import json
 import math
+import queue as _queue_lib
 import socket
 import threading
 import time
@@ -40,6 +41,81 @@ def _get_loaded_ctx(base_url: str, model: str) -> int | None:
     return None
 
 
+def _stream_request(
+    req: urllib.request.Request,
+    first_token_timeout: float,
+    generation_timeout: float,
+    abort_event: threading.Event | None,
+) -> dict:
+    """
+    Returns dict with keys:
+      chunks        — list of parsed JSON objects received
+      error         — exception or None
+      timeout_phase — None | "first_token" | "generation" | "aborted"
+    """
+    chunk_q: _queue_lib.Queue = _queue_lib.Queue()
+    exc_holder: list = [None]
+
+    def _reader() -> None:
+        try:
+            urlopen_timeout = first_token_timeout + generation_timeout + 5
+            with urllib.request.urlopen(req, timeout=urlopen_timeout) as resp:
+                for raw in resp:
+                    stripped = raw.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        chunk_q.put(json.loads(stripped))
+                    except json.JSONDecodeError:
+                        pass
+        except Exception as exc:
+            exc_holder[0] = exc
+        finally:
+            chunk_q.put(None)  # sentinel
+
+    threading.Thread(target=_reader, daemon=True).start()
+
+    try:
+        first = chunk_q.get(timeout=first_token_timeout)
+    except _queue_lib.Empty:
+        return {"chunks": [], "error": None, "timeout_phase": "first_token"}
+
+    if first is None:
+        return {"chunks": [], "error": exc_holder[0], "timeout_phase": None}
+
+    chunks = [first]
+    if first.get("done"):
+        return {"chunks": chunks, "error": None, "timeout_phase": None}
+
+    gen_deadline = time.monotonic() + generation_timeout
+
+    while True:
+        if abort_event is not None and abort_event.is_set():
+            return {"chunks": chunks, "error": None, "timeout_phase": "aborted"}
+
+        remaining = gen_deadline - time.monotonic()
+        if remaining <= 0:
+            return {"chunks": chunks, "error": None, "timeout_phase": "generation"}
+
+        try:
+            chunk = chunk_q.get(timeout=min(remaining, _ABORT_CHECK_S))
+        except _queue_lib.Empty:
+            if time.monotonic() >= gen_deadline:
+                return {"chunks": chunks, "error": None, "timeout_phase": "generation"}
+            continue
+
+        if chunk is None:
+            if exc_holder[0] is not None:
+                return {"chunks": chunks, "error": exc_holder[0], "timeout_phase": None}
+            break
+
+        chunks.append(chunk)
+        if chunk.get("done"):
+            break
+
+    return {"chunks": chunks, "error": None, "timeout_phase": None}
+
+
 def call_ollama(
     system: str,
     user: str,
@@ -51,6 +127,12 @@ def call_ollama(
     timeout     = int(cfg.extra_params.get("timeout", cfg.timeout))
     keep_alive  = cfg.extra_params.get("keep_alive", cfg.keep_alive)
     temperature = float(cfg.extra_params.get("temperature", 0))
+
+    ftt_raw = cfg.extra_params.get("first_token_timeout", cfg.first_token_timeout)
+    first_token_timeout = int(ftt_raw) if ftt_raw is not None else None
+
+    gtt_raw = cfg.extra_params.get("generation_timeout", cfg.generation_timeout)
+    generation_timeout  = int(gtt_raw) if gtt_raw is not None else timeout
 
     full_prompt = "\n\n---\n\n".join([system, user]) if system else user
     prompt_chars = len(system) + len(user)
@@ -93,7 +175,7 @@ def call_ollama(
     payload = {
         "model":      model,
         "prompt":     full_prompt,
-        "stream":     False,
+        "stream":     False,   # overridden to True in streaming path below
         "keep_alive": keep_alive,
         "think":      think,
         "options":    options,
@@ -110,16 +192,78 @@ def call_ollama(
         else:
             payload[key] = val
 
-    result: dict = {}
+    req = urllib.request.Request(
+        base_url + "/api/generate",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
     t0 = time.monotonic()
+
+    # --- streaming path ---
+    if first_token_timeout is not None:
+        payload["stream"] = True
+        sr = _stream_request(req, first_token_timeout, generation_timeout, abort_event)
+        call_s = time.monotonic() - t0
+
+        phase = sr["timeout_phase"]
+        if phase == "aborted":
+            return _ProviderResult(
+                text=None, outcome="aborted",
+                call_s=call_s, inference_s=0.0, load_s=0.0,
+                prompt_tokens=None, response_tokens=None,
+            )
+        if phase == "first_token":
+            return _ProviderResult(
+                text=None, outcome="timeout:first_token",
+                call_s=call_s, inference_s=0.0, load_s=0.0,
+                prompt_tokens=None, response_tokens=None,
+            )
+        if phase == "generation":
+            return _ProviderResult(
+                text=None, outcome="timeout:generation",
+                call_s=call_s, inference_s=0.0, load_s=0.0,
+                prompt_tokens=None, response_tokens=None,
+            )
+        if sr["error"] is not None:
+            exc = sr["error"]
+            if isinstance(exc, urllib.error.HTTPError):
+                return _ProviderResult(
+                    text=None, outcome=f"http_{exc.code}",
+                    call_s=call_s, inference_s=0.0, load_s=0.0,
+                    prompt_tokens=None, response_tokens=None,
+                )
+            if isinstance(exc, urllib.error.URLError):
+                return _ProviderResult(
+                    text=None, outcome="error:unreachable",
+                    call_s=call_s, inference_s=0.0, load_s=0.0,
+                    prompt_tokens=None, response_tokens=None,
+                )
+            return _ProviderResult(
+                text=None, outcome=f"error:{exc}",
+                call_s=call_s, inference_s=0.0, load_s=0.0,
+                prompt_tokens=None, response_tokens=None,
+            )
+
+        chunks = sr["chunks"]
+        text = "".join(c.get("response", "") for c in chunks).strip()
+        done = chunks[-1] if chunks else {}
+        ns = 1e9
+        load_s      = done.get("load_duration", 0) / ns
+        inference_s = (
+            done.get("prompt_eval_duration", 0) + done.get("eval_duration", 0)
+        ) / ns
+        return _ProviderResult(
+            text=text, outcome="success",
+            call_s=call_s, inference_s=inference_s, load_s=load_s,
+            prompt_tokens=done.get("prompt_eval_count"),
+            response_tokens=done.get("eval_count"),
+        )
+
+    # --- non-streaming path (original) ---
+    result: dict = {}
 
     def _do_request() -> None:
         try:
-            req = urllib.request.Request(
-                base_url + "/api/generate",
-                data=json.dumps(payload).encode(),
-                headers={"Content-Type": "application/json"},
-            )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 result["body"] = json.loads(resp.read())
         except Exception as exc:
@@ -142,12 +286,8 @@ def call_ollama(
     if "error" in result:
         exc = result["error"]
         if isinstance(exc, (TimeoutError, socket.timeout)):
-            if _check_ollama_busy(base_url, model):
-                outcome = "timeout:model_loaded_but_slow"
-            else:
-                outcome = "timeout:model_not_loaded"
             return _ProviderResult(
-                text=None, outcome=outcome,
+                text=None, outcome="timeout:generation",
                 call_s=call_s, inference_s=0.0, load_s=0.0,
                 prompt_tokens=None, response_tokens=None,
             )
@@ -172,20 +312,17 @@ def call_ollama(
     body = result["body"]
     text = body.get("response", "").strip()
 
-    # Ollama provides nanosecond timing fields in the response body.
     ns = 1e9
     load_s      = body.get("load_duration", 0) / ns
     inference_s = (
         body.get("prompt_eval_duration", 0) + body.get("eval_duration", 0)
     ) / ns
 
-    prompt_tokens   = body.get("prompt_eval_count")
-    response_tokens = body.get("eval_count")
-
     return _ProviderResult(
         text=text, outcome="success",
         call_s=call_s, inference_s=inference_s, load_s=load_s,
-        prompt_tokens=prompt_tokens, response_tokens=response_tokens,
+        prompt_tokens=body.get("prompt_eval_count"),
+        response_tokens=body.get("eval_count"),
     )
 
 

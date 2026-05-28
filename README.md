@@ -106,15 +106,27 @@ Make a synchronous LLM call. Returns an `LLMResult`.
 | `num_ctx_auto` | `True` | Ollama: auto-size context window |
 | `log_caller` | `""` | Caller name for JSONL log; empty = no logging |
 | `queue_mode` | `"cooperative"` | `"cooperative"` \| `"off"` |
+| `queue_timeout` | `None` | Seconds to wait in queue before giving up (`None` = unbounded) |
 | `priority` | 50 | Queue priority (higher runs first) |
 | `caller_max` | 4 | Max concurrent Ollama slots for this caller |
-| `retries` | 0 | Retry attempts on timeout / unreachable (0 = no retries) |
+| `first_token_timeout` | `None` | Ollama streaming: seconds from HTTP send to first token; enables streaming when set |
+| `generation_timeout` | `None` | Ollama streaming: seconds from first token to completion; falls back to `timeout` |
+| `retries` | 0 | Retry attempts on `timeout:generation` / unreachable (0 = no retries) |
 | `retry_delay` | 15 | Seconds to wait between retries |
+| `circuit_n` | 0 | Trip circuit after N consecutive triggering failures (0 = disabled) |
+| `circuit_cooldown_s` | 120.0 | Seconds before a tripped circuit allows a probe request |
+| `circuit_triggers` | see below | Outcome strings that increment the failure counter |
 | `extra_params` | `{}` | Pass-through to provider payload |
 
+Default `circuit_triggers`:
+`("timeout:queue_wait", "timeout:first_token", "error:unreachable")`.
+`timeout:generation` is intentionally excluded — inference started, the
+model is not unavailable.
+
 `extra_params` keys recognised by providers: `temperature`, `max_tokens`,
-`num_predict`, `num_ctx`, `keep_alive`, `timeout`, `tools` (claude_code
-only — passed as `--tools` to the CLI).
+`num_predict`, `num_ctx`, `keep_alive`, `timeout`, `first_token_timeout`,
+`generation_timeout`, `tools` (claude_code only — passed as `--tools`
+to the CLI).
 
 The `claude_code` provider shells out to `claude --print` rather than
 hitting the API directly, so it uses your Claude subscription rather
@@ -130,7 +142,7 @@ configured default. `url` and `api_key` are ignored.
 | Field | Type | Description |
 |-------|------|-------------|
 | `text` | str \| None | Response text; None on failure |
-| `outcome` | str | `"success"` \| `"timeout"` \| `"timeout:model_loaded_but_slow"` \| `"timeout:model_not_loaded"` \| `"http_NNN"` \| `"error:unreachable"` \| `"error:…"` \| `"aborted"` |
+| `outcome` | str | `"success"` \| `"aborted"` \| `"circuit_open"` \| `"timeout:queue_wait"` \| `"timeout:first_token"` \| `"timeout:generation"` \| `"error:unreachable"` \| `"http_NNN"` \| `"error:…"` |
 | `total_s` | float | Wall-clock: `queue_wait_s + call_s` |
 | `queue_wait_s` | float | Time blocked waiting for an Ollama slot |
 | `call_s` | float | Time from HTTP send to response |
@@ -223,10 +235,10 @@ processes share the same Ollama instance.
 
 Example priority configuration for two callers:
 
-| Caller | `priority` | `caller_max` |
-|--------|-----------|-------------|
-| interactive | 100 | 4 |
-| background  | 10  | 1 |
+| Caller | `priority` | `caller_max` | `queue_timeout` |
+|--------|-----------|-------------|----------------|
+| interactive | 100 | 4 | 8s |
+| background  | 10  | 1 | None |
 
 Promotion rules (all atomic, inside `BEGIN IMMEDIATE`):
 
@@ -236,8 +248,38 @@ Promotion rules (all atomic, inside `BEGIN IMMEDIATE`):
 4. No higher-priority *eligible* waiter exists (a blocked caller
    does not prevent lower-priority ones from proceeding).
 
+Set `queue_timeout` to fail fast when Ollama is saturated rather
+than waiting indefinitely. Outcome will be `"timeout:queue_wait"`.
+
 Pass an `abort_event: threading.Event` to `LLMClient` to cancel
 waiting or mid-inference — the result will have `outcome="aborted"`.
+
+### Streaming and two-phase timeouts (Ollama)
+
+Set `first_token_timeout` to enable streaming mode. The call is split
+into two phases with independent deadlines:
+
+- **Phase 1** (`first_token_timeout`): time from HTTP send to first
+  token. Times out as `"timeout:first_token"` — ollama has not yet
+  started on the request.
+- **Phase 2** (`generation_timeout`, default: `timeout`): time from
+  first token to completion. Times out as `"timeout:generation"` —
+  inference started but is running slow.
+
+`timeout:first_token` triggers the circuit breaker (ollama unavailable).
+`timeout:generation` does not (inference started; the model is working).
+
+### Circuit breaker
+
+Set `circuit_n > 0` to enable. After `circuit_n` consecutive triggering
+failures for a given `log_caller`, the circuit trips for
+`circuit_cooldown_s` seconds. During that window, calls return
+`"circuit_open"` immediately without touching Ollama. After the cooldown,
+one probe request is allowed through; success resets the circuit, failure
+restarts the cooldown.
+
+Circuit state is stored in the same SQLite DB as the queue
+(`circuit_state` table), so it is shared across processes.
 
 ---
 

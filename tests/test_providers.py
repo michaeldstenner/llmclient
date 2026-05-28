@@ -105,21 +105,12 @@ def test_ollama_num_ctx_not_set_when_disabled():
     assert "num_ctx" not in captured_payload["options"]
 
 
-def test_ollama_timeout_model_loaded():
+def test_ollama_timeout_non_streaming():
     cfg = _ollama_cfg()
     with mock_urlopen_timeout():
-        with patch("llmclient.providers.ollama._check_ollama_busy", return_value=True):
-            r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
-    assert r.outcome == "timeout:model_loaded_but_slow"
+        r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
+    assert r.outcome == "timeout:generation"
     assert r.text is None
-
-
-def test_ollama_timeout_model_not_loaded():
-    cfg = _ollama_cfg()
-    with mock_urlopen_timeout():
-        with patch("llmclient.providers.ollama._check_ollama_busy", return_value=False):
-            r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
-    assert r.outcome == "timeout:model_not_loaded"
 
 
 def test_ollama_http_error():

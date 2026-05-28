@@ -144,9 +144,10 @@ def test_acquire_release_round_trip(queue_db, monkeypatch):
     from unittest.mock import patch
     with patch("llmclient._keys.get_parallel_slots", return_value=4):
         cfg = make_cfg(log_caller="test", priority=50, caller_max=4, queue_mode="cooperative")
-        row_id, wait_s = acquire(cfg, None)
+        row_id, wait_s, reason = acquire(cfg, None)
         assert row_id is not None
         assert wait_s >= 0.0
+        assert reason == "ok"
         assert _status(queue_db, row_id) == "running"
         release(row_id)
         assert _status(queue_db, row_id) is None
@@ -160,8 +161,9 @@ def test_acquire_aborted_immediately(queue_db, monkeypatch):
         abort = threading.Event()
         abort.set()  # already fired
         cfg = make_cfg(log_caller="test", priority=50, caller_max=4)
-        row_id, wait_s = acquire(cfg, abort)
+        row_id, wait_s, reason = acquire(cfg, abort)
         assert row_id is None
+        assert reason == "aborted"
         assert _count(queue_db, "waiting") == 0
 
 
@@ -175,13 +177,13 @@ def test_acquire_waits_then_proceeds(queue_db, monkeypatch):
         cfg = make_cfg(log_caller="test", priority=50, caller_max=4)
 
         # Occupy the one slot
-        row1, _ = acquire(cfg, None)
+        row1, _, _r = acquire(cfg, None)
         assert row1 is not None
 
         # Start second acquire in a thread — it should wait
         results: dict = {}
         def _second():
-            row2, w = acquire(cfg, None)
+            row2, w, _ = acquire(cfg, None)
             results["row_id"] = row2
             results["wait_s"] = w
             if row2 is not None:

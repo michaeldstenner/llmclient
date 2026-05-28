@@ -1,8 +1,11 @@
 from dataclasses import dataclass, field, replace as _dc_replace
 import threading
 
-_RETRYABLE = {"timeout", "timeout:model_loaded_but_slow",
-              "timeout:model_not_loaded", "error:unreachable"}
+_RETRYABLE = {
+    "timeout:generation", "error:unreachable",
+    # legacy names kept for any surviving callers
+    "timeout", "timeout:model_loaded_but_slow", "timeout:model_not_loaded",
+}
 
 
 @dataclass(frozen=True)
@@ -15,11 +18,21 @@ class LLMConfig:
     keep_alive:   str  = "60m"
     num_ctx_auto: bool = True
     log_caller:   str  = ""
-    queue_mode:   str  = "cooperative"
-    priority:     int  = 50
-    caller_max:   int  = 4
-    retries:      int  = 0
-    retry_delay:  int  = 15
+    queue_mode:          str        = "cooperative"
+    queue_timeout:       float|None = None
+    priority:            int        = 50
+    caller_max:          int        = 4
+    first_token_timeout: int|None   = None
+    generation_timeout:  int|None   = None
+    retries:             int        = 0
+    retry_delay:         int        = 15
+    circuit_n:           int        = 0
+    circuit_cooldown_s:  float      = 120.0
+    circuit_triggers:    tuple      = (
+        "timeout:queue_wait",
+        "timeout:first_token",
+        "error:unreachable",
+    )
     extra_params: dict = field(default_factory=dict)
 
 
@@ -98,7 +111,7 @@ class LLMClient:
         extra_params: dict | None = None,
     ) -> LLMResult:
         import time
-        from ._queue import acquire, release
+        from ._queue import acquire, release, circuit_check, circuit_record
         from .providers import dispatch
         from ._log import write_log
 
@@ -112,8 +125,25 @@ class LLMClient:
         )
         prompt_chars = len(system) + len(user)
         attempts     = cfg.retries + 1
-        result       = None
 
+        # Circuit breaker check — once before all attempts.
+        is_probe = False
+        if cfg.circuit_n > 0 and cfg.log_caller:
+            check = circuit_check(cfg)
+            if check == "open":
+                result = LLMResult(
+                    text=None, outcome="circuit_open",
+                    total_s=0.0, queue_wait_s=0.0, call_s=0.0,
+                    inference_s=0.0, load_s=0.0,
+                    prompt_chars=prompt_chars, response_chars=0,
+                    prompt_tokens=None, response_tokens=None,
+                )
+                if cfg.log_caller:
+                    write_log(cfg, operation, result, context)
+                return result
+            is_probe = (check == "probe")
+
+        result = None
         for attempt in range(attempts):
             if attempt > 0:
                 time.sleep(cfg.retry_delay)
@@ -121,10 +151,14 @@ class LLMClient:
             queue_wait_s = 0.0
             queue_id     = None
             if cfg.queue_mode == "cooperative" and cfg.provider == "ollama":
-                queue_id, queue_wait_s = acquire(cfg, self._abort)
+                queue_id, queue_wait_s, queue_reason = acquire(cfg, self._abort)
                 if queue_id is None:
+                    outcome = (
+                        "aborted" if queue_reason == "aborted"
+                        else "timeout:queue_wait"
+                    )
                     result = LLMResult(
-                        text=None, outcome="aborted",
+                        text=None, outcome=outcome,
                         total_s=round(queue_wait_s, 3),
                         queue_wait_s=round(queue_wait_s, 3),
                         call_s=0.0, inference_s=0.0, load_s=0.0,
@@ -157,6 +191,9 @@ class LLMClient:
             if result.outcome not in _RETRYABLE:
                 break
 
+        if cfg.circuit_n > 0 and cfg.log_caller and result is not None:
+            circuit_record(cfg, result.outcome, is_probe=is_probe)
+
         if cfg.log_caller:
             write_log(cfg, operation, result, context)
         return result
@@ -178,10 +215,14 @@ class LLMClient:
         queue_wait_s = 0.0
         queue_id     = None
         if cfg.queue_mode == "cooperative" and cfg.provider == "ollama":
-            queue_id, queue_wait_s = acquire(cfg, self._abort)
+            queue_id, queue_wait_s, queue_reason = acquire(cfg, self._abort)
             if queue_id is None:
+                outcome = (
+                    "aborted" if queue_reason == "aborted"
+                    else "timeout:queue_wait"
+                )
                 result = EmbedResult(
-                    vector=None, outcome="aborted",
+                    vector=None, outcome=outcome,
                     total_s=round(queue_wait_s, 3),
                     queue_wait_s=round(queue_wait_s, 3),
                     call_s=0.0, load_s=0.0,
