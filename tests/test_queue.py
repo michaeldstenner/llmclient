@@ -30,6 +30,7 @@ def _open(db_path: Path) -> sqlite3.Connection:
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             pid          INTEGER NOT NULL,
             caller       TEXT    NOT NULL,
+            model        TEXT    NOT NULL DEFAULT '',
             priority     INTEGER NOT NULL DEFAULT 50,
             caller_max   INTEGER NOT NULL DEFAULT 4,
             global_max   INTEGER NOT NULL DEFAULT 4,
@@ -41,14 +42,14 @@ def _open(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _insert(db_path, *, pid, caller="test", priority=50,
+def _insert(db_path, *, pid, caller="test", model="", priority=50,
             caller_max=4, global_max=4, status="waiting") -> int:
     conn = _open(db_path)
     cur = conn.execute(
         "INSERT INTO queue "
-        "(pid,caller,priority,caller_max,global_max,status,submitted_at) "
-        "VALUES (?,?,?,?,?,?,?)",
-        [pid, caller, priority, caller_max, global_max, status, time.time()],
+        "(pid,caller,model,priority,caller_max,global_max,status,submitted_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        [pid, caller, model, priority, caller_max, global_max, status, time.time()],
     )
     conn.commit()
     rid = cur.lastrowid
@@ -79,7 +80,7 @@ def _count(db_path, status) -> int:
 def test_promote_empty_queue(queue_db):
     """A single waiting row promotes immediately."""
     row_id = _insert(queue_db, pid=os.getpid())
-    assert _try_promote(row_id, "test", 50, 4, 4) is True
+    assert _try_promote(row_id, "test", "", 50, 4, 4) is True
     assert _status(queue_db, row_id) == "running"
 
 
@@ -87,7 +88,7 @@ def test_promote_blocked_by_global_max(queue_db):
     """A slot-full queue blocks promotion."""
     _insert(queue_db, pid=os.getpid(), status="running")
     waiting = _insert(queue_db, pid=os.getpid())
-    assert _try_promote(waiting, "test", 50, 4, 1) is False
+    assert _try_promote(waiting, "test", "", 50, 4, 1) is False
     assert _status(queue_db, waiting) == "waiting"
 
 
@@ -95,7 +96,7 @@ def test_promote_blocked_by_caller_max(queue_db):
     """Per-caller cap blocks a second call from the same caller."""
     _insert(queue_db, pid=os.getpid(), caller="bouncer", status="running")
     waiting = _insert(queue_db, pid=os.getpid(), caller="bouncer")
-    assert _try_promote(waiting, "bouncer", 50, 1, 4) is False
+    assert _try_promote(waiting, "bouncer", "", 50, 1, 4) is False
 
 
 def test_promote_blocked_by_higher_priority_waiter(queue_db):
@@ -104,9 +105,9 @@ def test_promote_blocked_by_higher_priority_waiter(queue_db):
                    caller_max=4)
     low  = _insert(queue_db, pid=os.getpid(), priority=10, caller="watchdog",
                    caller_max=4)
-    assert _try_promote(low, "watchdog", 10, 4, 4) is False
+    assert _try_promote(low, "watchdog", "", 10, 4, 4) is False
     # High-priority can still promote
-    assert _try_promote(high, "bouncer", 100, 4, 4) is True
+    assert _try_promote(high, "bouncer", "", 100, 4, 4) is True
 
 
 def test_promote_higher_priority_blocked_by_own_caller_max_does_not_block_lower(queue_db):
@@ -121,7 +122,7 @@ def test_promote_higher_priority_blocked_by_own_caller_max_does_not_block_lower(
     low  = _insert(queue_db, pid=os.getpid(), priority=10, caller="watchdog",
                    caller_max=4)
     # high is blocked by its own caller_max, so low should proceed
-    assert _try_promote(low, "watchdog", 10, 4, 4) is True
+    assert _try_promote(low, "watchdog", "", 10, 4, 4) is True
 
 
 def test_crash_reaping(queue_db):
@@ -130,7 +131,7 @@ def test_crash_reaping(queue_db):
     _insert(queue_db, pid=dead_pid, status="running")
     waiting = _insert(queue_db, pid=os.getpid())
     # Promote should reap dead_pid row and then succeed
-    assert _try_promote(waiting, "test", 50, 4, 4) is True
+    assert _try_promote(waiting, "test", "", 50, 4, 4) is True
     assert _count(queue_db, "running") == 1
 
 
@@ -141,8 +142,39 @@ def test_dead_waiting_rows_do_not_block_promotion(queue_db):
     _insert(queue_db, pid=dead_pid, priority=50, caller="ghost")
     live = _insert(queue_db, pid=os.getpid(), priority=10, caller="live")
     # Before the fix: dead ghost row (priority=50) blocked live (priority=10).
-    assert _try_promote(live, "live", 10, 4, 4) is True
+    assert _try_promote(live, "live", "", 10, 4, 4) is True
     assert _count(queue_db, "waiting") == 0  # ghost reaped
+
+
+# ---------------------------------------------------------------------------
+# Per-model slot isolation
+# ---------------------------------------------------------------------------
+
+def test_different_models_dont_share_global_slots(queue_db):
+    """A running call for model A does not consume a slot for model B."""
+    _insert(queue_db, pid=os.getpid(), model="qwen3:32b", status="running")
+    waiting = _insert(queue_db, pid=os.getpid(), model="nomic-embed-text")
+    # global_max=1 per model — but the running row is for a different model
+    assert _try_promote(waiting, "test", "nomic-embed-text", 50, 4, 1) is True
+
+
+def test_same_model_shares_global_slots(queue_db):
+    """Two callers running the same model do share the per-model global cap."""
+    _insert(queue_db, pid=os.getpid(), model="qwen3:32b", status="running")
+    waiting = _insert(queue_db, pid=os.getpid(), model="qwen3:32b")
+    assert _try_promote(waiting, "test", "qwen3:32b", 50, 4, 1) is False
+
+
+def test_priority_blocking_is_model_scoped(queue_db):
+    """A high-priority waiter for model A does not block a waiter for model B."""
+    # High-priority bouncer waiting for qwen
+    _insert(queue_db, pid=os.getpid(), priority=100, caller="bouncer",
+            model="qwen3:32b", caller_max=4)
+    # Lower-priority squirrel waiting for nomic
+    low = _insert(queue_db, pid=os.getpid(), priority=10, caller="squirrel",
+                  model="nomic-embed-text", caller_max=4)
+    # squirrel should promote — the bouncer waiter is for a different model
+    assert _try_promote(low, "squirrel", "nomic-embed-text", 10, 4, 4) is True
 
 
 # ---------------------------------------------------------------------------

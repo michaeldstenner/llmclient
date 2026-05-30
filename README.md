@@ -109,7 +109,7 @@ Make a synchronous LLM call. Returns an `LLMResult`.
 | `queue_timeout` | `None` | Seconds to wait in queue before giving up (`None` = unbounded) |
 | `queue_stall_timeout` | `None` | Seconds without any inference completing before declaring the queue frozen; produces `timeout:queue_stall` (`None` = disabled) |
 | `priority` | 50 | Queue priority (higher runs first) |
-| `caller_max` | 4 | Max concurrent Ollama slots for this caller |
+| `caller_max` | 4 | Max concurrent slots for this caller, per model |
 | `first_token_timeout` | `None` | Ollama streaming: seconds from HTTP send to first token; enables streaming when set |
 | `generation_timeout` | `None` | Ollama streaming: seconds from first token to completion; falls back to `timeout` |
 | `retries` | 0 | Retry attempts on `timeout:generation` / unreachable (0 = no retries) |
@@ -153,7 +153,7 @@ configured default. `url` and `api_key` are ignored.
 | `response_chars` | int | `len(text)` or 0 on failure |
 | `prompt_tokens` | int \| None | From provider response body |
 | `response_tokens` | int \| None | From provider response body |
-| `queue_snapshot` | list[dict] \| None | Queue state at timeout; present on `timeout:queue_wait` and `timeout:queue_stall`; each entry: `{id, pid, caller, priority, status, age_s, running_s}` |
+| `queue_snapshot` | list[dict] \| None | Queue state at timeout; present on `timeout:queue_wait` and `timeout:queue_stall`; each entry: `{id, pid, caller, model, priority, status, age_s, running_s}` |
 | `is_success` | bool | `True` when `outcome == "success"` (property) |
 
 ---
@@ -180,7 +180,9 @@ ollama:
   parallel_slots: 4   # must match OLLAMA_NUM_PARALLEL
 ```
 
-`parallel_slots` sets the global cap for the cooperative queue.
+`parallel_slots` sets the per-model global cap for the cooperative
+queue.  Requests for different models do not compete for the same
+slots.
 Default is 4 when the file is absent or the key is missing.
 
 ---
@@ -245,10 +247,13 @@ Example priority configuration for two callers:
 Promotion rules (all atomic, inside `BEGIN IMMEDIATE`):
 
 1. Reap rows whose PID is gone (crash-safe).
-2. `global_running < global_max` (from `keys.yaml`).
-3. `caller_running < caller_max`.
-4. No higher-priority *eligible* waiter exists (a blocked caller
-   does not prevent lower-priority ones from proceeding).
+2. `model_running < global_max` — counts only rows for the same
+   model; requests for different models do not compete.
+3. `caller_model_running < caller_max` — per-caller cap, also
+   scoped to the same model.
+4. No higher-priority *eligible* waiter for the same model exists
+   (a blocked caller does not prevent lower-priority ones from
+   proceeding).
 
 Set `queue_timeout` to fail fast when Ollama is saturated rather
 than waiting indefinitely. Outcome will be `"timeout:queue_wait"`.

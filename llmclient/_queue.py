@@ -3,12 +3,14 @@ Cooperative cross-process SQLite queue for Ollama slot management,
 plus a per-caller circuit breaker.
 
 Queue: each caller inserts a row, polls until promoted to 'running',
-does its inference, then deletes the row.  Promotion logic:
+does its inference, then deletes the row.  Promotion logic is
+model-scoped — requests for different models do not compete for the
+same slots.  Within a model:
 
   1. Reap crashed processes (running rows whose PID is gone).
-  2. Check global_running < global_max  (total Ollama slots).
-  3. Check caller_running < caller_max  (per-caller cap).
-  4. Check no higher-priority eligible waiter exists.
+  2. Check model_running < global_max  (total slots for this model).
+  3. Check caller_model_running < caller_max  (per-caller cap).
+  4. Check no higher-priority eligible waiter for the same model.
   5. Atomically flip status → 'running'.
 
 Circuit breaker: tracks consecutive triggering failures per caller in
@@ -19,13 +21,9 @@ the circuit_state table.  States derived from (tripped_at, probe_pid):
   tripped_at NOT NULL, cooldown expired        → half-open (allow probe)
   tripped_at NOT NULL, probe_pid NOT NULL      → probing
 
-queue_meta: single-row bookkeeping, currently tracks last_release_at
-(timestamp of the most recent successful inference completion).  Used by
-the queue_stall_timeout health check to distinguish "busy but moving"
-from "completely frozen".
-
-All multi-step reads/writes happen inside BEGIN IMMEDIATE so only one
-process wins races when many poll simultaneously.
+queue_meta: single-row bookkeeping.  Tracks last_release_at globally
+and per-model (key 'last_release_at:<model>') so stall detection for
+one model is not masked by completions from another.
 """
 import logging
 import os
@@ -43,6 +41,7 @@ CREATE TABLE IF NOT EXISTS queue (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     pid          INTEGER NOT NULL,
     caller       TEXT    NOT NULL,
+    model        TEXT    NOT NULL DEFAULT '',
     priority     INTEGER NOT NULL DEFAULT 50,
     caller_max   INTEGER NOT NULL DEFAULT 4,
     global_max   INTEGER NOT NULL DEFAULT 4,
@@ -77,6 +76,13 @@ def _open() -> sqlite3.Connection:
     conn.execute(_CREATE_QUEUE)
     conn.execute(_CREATE_CIRCUIT)
     conn.execute(_CREATE_META)
+    # Migrate existing DBs that predate the model column
+    try:
+        conn.execute(
+            "ALTER TABLE queue ADD COLUMN model TEXT NOT NULL DEFAULT ''"
+        )
+    except Exception:
+        pass
     return conn
 
 
@@ -84,7 +90,7 @@ def _open() -> sqlite3.Connection:
 # Queue internals
 # ---------------------------------------------------------------------------
 
-def _try_promote(row_id: int, caller: str, priority: int,
+def _try_promote(row_id: int, caller: str, model: str, priority: int,
                  caller_max: int, global_max: int) -> bool:
     """Open a fresh connection and attempt atomic promotion. Returns True on success."""
     conn = _open()
@@ -100,36 +106,42 @@ def _try_promote(row_id: int, caller: str, priority: int,
             except ProcessLookupError:
                 conn.execute("DELETE FROM queue WHERE id=?", [rid])
 
-        # Global capacity check
-        global_running = conn.execute(
-            "SELECT COUNT(*) FROM queue WHERE status='running'"
+        # Per-model global capacity check
+        model_running = conn.execute(
+            "SELECT COUNT(*) FROM queue WHERE status='running' AND model=?",
+            [model],
         ).fetchone()[0]
-        if global_running >= global_max:
+        if model_running >= global_max:
             conn.execute("ROLLBACK")
             return False
 
-        # Per-caller capacity check
-        caller_running = conn.execute(
-            "SELECT COUNT(*) FROM queue WHERE status='running' AND caller=?",
-            [caller],
+        # Per-model per-caller capacity check
+        caller_model_running = conn.execute(
+            "SELECT COUNT(*) FROM queue "
+            "WHERE status='running' AND caller=? AND model=?",
+            [caller, model],
         ).fetchone()[0]
-        if caller_running >= caller_max:
+        if caller_model_running >= caller_max:
             conn.execute("ROLLBACK")
             return False
 
-        # No higher-priority eligible waiter should jump ahead of me.
-        # "Eligible" means the waiter's own caller_running < caller_max.
+        # No higher-priority eligible waiter for the same model should jump
+        # ahead.  "Eligible" means the waiter's own caller_model_running <
+        # caller_max.
         blocking = conn.execute("""
             SELECT 1 FROM queue w
             WHERE  w.status   = 'waiting'
               AND  w.id      != ?
+              AND  w.model   = ?
               AND  w.priority > ?
               AND  (
                 SELECT COUNT(*) FROM queue r
-                WHERE  r.status = 'running' AND r.caller = w.caller
+                WHERE  r.status = 'running'
+                  AND  r.caller = w.caller
+                  AND  r.model  = w.model
               ) < w.caller_max
             LIMIT 1
-        """, [row_id, priority]).fetchone()
+        """, [row_id, model, priority]).fetchone()
         if blocking:
             conn.execute("ROLLBACK")
             return False
@@ -163,7 +175,8 @@ def _read_queue_state() -> list[dict]:
     conn = _open()
     try:
         rows = conn.execute(
-            "SELECT id, pid, caller, priority, status, submitted_at, started_at "
+            "SELECT id, pid, caller, model, priority, status, "
+            "submitted_at, started_at "
             "FROM queue ORDER BY submitted_at"
         ).fetchall()
         now = time.time()
@@ -172,10 +185,11 @@ def _read_queue_state() -> list[dict]:
                 "id":        r[0],
                 "pid":       r[1],
                 "caller":    r[2],
-                "priority":  r[3],
-                "status":    r[4],
-                "age_s":     round(now - r[5], 1),
-                "running_s": round(now - r[6], 1) if r[6] else None,
+                "model":     r[3],
+                "priority":  r[4],
+                "status":    r[5],
+                "age_s":     round(now - r[6], 1),
+                "running_s": round(now - r[7], 1) if r[7] else None,
             }
             for r in rows
         ]
@@ -200,15 +214,18 @@ def acquire(
 
     global_max = get_parallel_slots()
     caller     = cfg.log_caller or "unknown"
+    model      = cfg.model or ""
 
     conn = _open()
     try:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             "INSERT INTO queue "
-            "(pid, caller, priority, caller_max, global_max, status, submitted_at) "
-            "VALUES (?, ?, ?, ?, ?, 'waiting', ?)",
-            [os.getpid(), caller, cfg.priority, cfg.caller_max, global_max, time.time()],
+            "(pid, caller, model, priority, caller_max, global_max, "
+            " status, submitted_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'waiting', ?)",
+            [os.getpid(), caller, model, cfg.priority,
+             cfg.caller_max, global_max, time.time()],
         )
         row_id = cur.lastrowid
         conn.execute("COMMIT")
@@ -233,18 +250,15 @@ def acquire(
                 return None, time.monotonic() - t0, "queue_timeout", snapshot
 
             if stall_t is not None:
-                last_rel = _read_last_release()
+                last_rel = _read_last_release(model)
                 if last_rel is None:
-                    # No completions in DB — fresh install or DB was reset.
-                    # Can't tell if stalled; skip stall check and rely on
-                    # queue_timeout as the hard ceiling.
                     if not no_history_logged:
                         _log.warning(
-                            "queue stall check skipped for caller=%r: "
+                            "queue stall check skipped for caller=%r model=%r: "
                             "no completion history in queue_meta "
                             "(fresh install or DB reset) — "
                             "queue_timeout hard ceiling still applies",
-                            caller,
+                            caller, model,
                         )
                         no_history_logged = True
                 elif (time.time() - last_rel) > stall_t:
@@ -252,7 +266,8 @@ def acquire(
                     _delete_row(row_id)
                     return None, time.monotonic() - t0, "queue_stalled", snapshot
 
-            if _try_promote(row_id, caller, cfg.priority, cfg.caller_max, global_max):
+            if _try_promote(row_id, caller, model,
+                            cfg.priority, cfg.caller_max, global_max):
                 return row_id, time.monotonic() - t0, "ok", None
 
             time.sleep(_POLL_S)
@@ -264,10 +279,22 @@ def acquire(
         raise
 
 
-def _read_last_release() -> float | None:
-    """Return the timestamp of the most recent inference completion, or None."""
+def _read_last_release(model: str = "") -> float | None:
+    """Return the timestamp of the most recent inference completion.
+
+    Checks the model-specific key first so that completions for one
+    model don't mask a stall in another.  Falls back to the global key
+    when no model-specific record exists yet.
+    """
     conn = _open()
     try:
+        if model:
+            row = conn.execute(
+                "SELECT value FROM queue_meta WHERE key=?",
+                [f"last_release_at:{model}"],
+            ).fetchone()
+            if row:
+                return float(row[0])
         row = conn.execute(
             "SELECT value FROM queue_meta WHERE key='last_release_at'"
         ).fetchone()
@@ -278,21 +305,28 @@ def _read_last_release() -> float | None:
         conn.close()
 
 
-def release(queue_id: int) -> None:
-    """Remove the running row, freeing the slot, and record completion time.
+def release(queue_id: int, model: str = "") -> None:
+    """Remove the running row and record completion time.
 
-    Writes last_release_at to queue_meta so stall-detection can distinguish
-    "queue is busy but moving" from "queue is frozen".
+    Writes last_release_at globally and per-model so stall detection
+    for each model stays independent.
     """
     conn = _open()
     try:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM queue WHERE id=?", [queue_id])
+        now = str(time.time())
         conn.execute(
             "INSERT OR REPLACE INTO queue_meta (key, value) "
             "VALUES ('last_release_at', ?)",
-            [str(time.time())],
+            [now],
         )
+        if model:
+            conn.execute(
+                "INSERT OR REPLACE INTO queue_meta (key, value) "
+                "VALUES (?, ?)",
+                [f"last_release_at:{model}", now],
+            )
         conn.execute("COMMIT")
     except Exception:
         try:

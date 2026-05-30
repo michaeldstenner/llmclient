@@ -37,18 +37,12 @@ def _ollama_num_parallel() -> int | None:
         return None
 
 
-def _active_connection_count(port: int = 11434) -> int:
-    """Total number of client connections currently open to port."""
-    return sum(_direct_connections(port).values())
-
-
 def _direct_connections(
     port: int = 11434,
 ) -> dict[tuple[str, int], int]:
     """
-    Return {(cmd, pid): count} for processes with a TCP connection
-    TO :port — i.e., clients bypassing nothing, hitting the server
-    directly.  Excludes the server process itself.
+    Return {(cmd, pid): count} for processes with an ESTABLISHED TCP
+    connection to :port.  Excludes the server process itself.
     """
     try:
         r = subprocess.run(
@@ -79,24 +73,54 @@ def _queue_rows() -> list[dict]:
         return []
     try:
         conn = sqlite3.connect(str(_DB))
-        rows = conn.execute("""
-            SELECT id, caller, status, pid,
-                   CAST(strftime('%s','now') AS INTEGER)
-                   - CAST(submitted_at AS INTEGER) AS age_s
-            FROM   queue
-            ORDER  BY submitted_at
-        """).fetchall()
+        try:
+            rows = conn.execute("""
+                SELECT id, caller, status, pid, model,
+                       CAST(strftime('%s','now') AS INTEGER)
+                       - CAST(submitted_at AS INTEGER) AS age_s,
+                       CASE WHEN started_at IS NOT NULL
+                            THEN CAST(strftime('%s','now') AS INTEGER)
+                                 - CAST(started_at AS INTEGER)
+                            ELSE NULL
+                       END AS running_s
+                FROM   queue
+                ORDER  BY submitted_at
+            """).fetchall()
+            result = [
+                {
+                    "id":       r[0],
+                    "caller":   r[1],
+                    "status":   r[2],
+                    "pid":      r[3],
+                    "model":    r[4] or "",
+                    "age_s":    r[5],
+                    "running_s": r[6],
+                }
+                for r in rows
+            ]
+        except Exception:
+            # Old schema without model column
+            rows = conn.execute("""
+                SELECT id, caller, status, pid,
+                       CAST(strftime('%s','now') AS INTEGER)
+                       - CAST(submitted_at AS INTEGER) AS age_s
+                FROM   queue
+                ORDER  BY submitted_at
+            """).fetchall()
+            result = [
+                {
+                    "id":       r[0],
+                    "caller":   r[1],
+                    "status":   r[2],
+                    "pid":      r[3],
+                    "model":    "",
+                    "age_s":    r[4],
+                    "running_s": None,
+                }
+                for r in rows
+            ]
         conn.close()
-        return [
-            {
-                "id":     r[0],
-                "caller": r[1],
-                "status": r[2],
-                "pid":    r[3],
-                "age_s":  r[4],
-            }
-            for r in rows
-        ]
+        return result
     except Exception:
         return []
 
@@ -199,9 +223,71 @@ def _fmt_expires(iso: str) -> str:
 
 def cmd_status(args) -> None:
     from .._keys import resolve_url
-    url = resolve_url("ollama", "")
 
+    url          = resolve_url("ollama", "")
     num_parallel = _ollama_num_parallel()
+    cap_str      = str(num_parallel) if num_parallel is not None else "?"
+
+    rows       = _queue_rows()
+    queue_pids = {r["pid"] for r in rows}
+
+    # Group all queue rows by model
+    by_model: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        by_model[r["model"]].append(r)
+
+    # TCP connections not accounted for by the queue
+    conns     = _direct_connections(11434)
+    unmanaged = {
+        (cmd, pid): n
+        for (cmd, pid), n in conns.items()
+        if pid not in queue_pids
+    }
+
+    # ── CONNECTIONS ───────────────────────────────────────────────────
+    print("CONNECTIONS  :11434")
+    any_output = False
+
+    for model in sorted(by_model):
+        model_rows = by_model[model]
+        running_n  = sum(1 for r in model_rows if r["status"] == "running")
+        label      = model or "(unknown model)"
+        print(f"\n  {label}  ({running_n}/{cap_str} slots)")
+
+        def _sort_key(r):
+            if r["status"] == "running":
+                return (0, -(r["running_s"] or 0))
+            return (1, r["age_s"] or 0)
+
+        for r in sorted(model_rows, key=_sort_key):
+            age = (
+                r["running_s"]
+                if r["status"] == "running" and r["running_s"] is not None
+                else r["age_s"]
+            )
+            age_str = f"{age}s" if age is not None else "?"
+            print(
+                f"    {r['caller']:<16} pid:{r['pid']:<8}"
+                f" {r['status']:<8} {age_str:>6}"
+            )
+        any_output = True
+
+    if unmanaged:
+        print("\n  unmanaged  (not in queue; may be idle keep-alive)")
+        for (cmd, pid), n in sorted(unmanaged.items(), key=lambda kv: -kv[1]):
+            pl     = "s" if n != 1 else ""
+            warn   = "  ← saturating" if n >= 4 else ""
+            detail = _process_detail(pid)
+            print(f"    {cmd:<22} pid:{pid:<8} {n} conn{pl}{warn}")
+            if detail:
+                print(f"      → {detail}")
+        any_output = True
+
+    if not any_output:
+        print("  (none)")
+
+    # ── OLLAMA ────────────────────────────────────────────────────────
+    print()
     par_str = (
         f"  (NUM_PARALLEL={num_parallel})"
         if num_parallel is not None else ""
@@ -213,53 +299,33 @@ def cmd_status(args) -> None:
     elif not models:
         print("  (no models loaded)")
     else:
-        active = _active_connection_count(11434)
-        cap    = num_parallel or "?"
         for m in models:
             name = m.get("model", "?")
             ctx  = m.get("context_length", "?")
             exp  = _fmt_expires(m.get("expires_at", ""))
-            print(
-                f"  {name:<32} ctx:{ctx:<6}"
-                f"  {active}/{cap} slots  {exp}"
-            )
+            print(f"  {name:<32} ctx:{ctx:<6}  {exp}")
 
+    # ── QUEUE ─────────────────────────────────────────────────────────
     print()
-    print("CONNECTIONS  :11434  (direct — outside llmclient queue)")
-    conns     = _direct_connections(11434)
-    queue_pids = {r["pid"] for r in _queue_rows()}
-    if not conns:
-        print("  (none)")
-    else:
-        for (cmd, pid), n in sorted(
-            conns.items(), key=lambda kv: -kv[1]
-        ):
-            via    = "  [via queue]" if pid in queue_pids else ""
-            warn   = "  ← saturating" if n >= 4 else ""
-            pl     = "s" if n != 1 else ""
-            detail = _process_detail(pid)
-            print(
-                f"  {cmd:<22} pid:{pid:<8} "
-                f"{n} conn{pl}{via}{warn}"
-            )
-            if detail:
-                print(f"    → {detail}")
-
-    print()
-    cmd_queue(args)
+    cmd_queue(args, rows=rows)
 
 
-def cmd_queue(args) -> None:
-    rows = _queue_rows()
+def cmd_queue(args, rows: list[dict] | None = None) -> None:
+    if rows is None:
+        rows = _queue_rows()
     print("LLMCLIENT QUEUE")
     if not rows:
         msg = "(queue.db not found)" if not _DB.exists() else "(empty)"
         print(f"  {msg}")
         return
-    print(f"  {'id':<5} {'caller':<18} {'status':<10} {'age':>6}  pid")
+    print(
+        f"  {'id':<5} {'caller':<16} {'model':<28}"
+        f" {'status':<10} {'age':>6}  pid"
+    )
     for r in rows:
-        age = f"{r['age_s']}s" if r["age_s"] is not None else "?"
+        age   = f"{r['age_s']}s" if r["age_s"] is not None else "?"
+        model = r.get("model") or "(unknown)"
         print(
-            f"  {r['id']:<5} {r['caller']:<18} "
-            f"{r['status']:<10} {age:>6}  {r['pid']}"
+            f"  {r['id']:<5} {r['caller']:<16} {model:<28}"
+            f" {r['status']:<10} {age:>6}  {r['pid']}"
         )

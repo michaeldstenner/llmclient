@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.5.0] — 2026-05-30
+
+### Changed
+
+- **Queue slot accounting is now per-model.**  Previously `global_max`
+  counted all concurrent Ollama requests together — a nomic-embed-text
+  call consumed one of qwen3's slots.  Now `global_max` and
+  `caller_max` are each scoped to a model; requests for different
+  models do not compete.  This corrects over-throttling in mixed
+  embed+generation workloads.
+
+- **`queue.db` schema** — new `model TEXT NOT NULL DEFAULT ''` column
+  on the `queue` table.  Existing DBs auto-migrate via `ALTER TABLE`
+  on first open.
+
+- **`queue_snapshot` entries** — include `model` field.
+
+- **`release(queue_id, model="")` signature** — now accepts an
+  optional model name.  Writes `last_release_at:<model>` to
+  `queue_meta` alongside the global key so stall detection for a slow
+  model is not masked by completions from a different model.  Internal
+  API; callers using `LLMClient` are unaffected.
+
+### Changed (CLI)
+
+- **`llmc status` output restructured** — CONNECTIONS section is now
+  first (grouped by model with per-model slot counts), followed by
+  OLLAMA (model list + expiry), then QUEUE.  Queue-managed connections
+  are grouped under their model; unmanaged connections (PIDs not in the
+  queue) appear in a separate `unmanaged` block with an idle-keep-alive
+  caveat.  Running rows show time-since-started; waiting rows show
+  time-since-submitted.
+
+- **`llmc queue` table** — includes `model` column.
+
+---
+
 ## [0.4.1] — 2026-05-28
 
 ### Added

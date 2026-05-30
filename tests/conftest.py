@@ -93,6 +93,7 @@ def insert_queue_row(
     *,
     pid: int,
     caller: str = "test",
+    model: str = "",
     priority: int = 50,
     caller_max: int = 4,
     global_max: int = 4,
@@ -103,9 +104,9 @@ def insert_queue_row(
     try:
         cur = conn.execute(
             "INSERT INTO queue "
-            "(pid, caller, priority, caller_max, global_max, status, submitted_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [pid, caller, priority, caller_max, global_max, status, time.time()],
+            "(pid, caller, model, priority, caller_max, global_max, status, submitted_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [pid, caller, model, priority, caller_max, global_max, status, time.time()],
         )
         conn.commit()
         return cur.lastrowid
@@ -122,6 +123,7 @@ def _raw_open(db_path: Path) -> sqlite3.Connection:
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             pid          INTEGER NOT NULL,
             caller       TEXT    NOT NULL,
+            model        TEXT    NOT NULL DEFAULT '',
             priority     INTEGER NOT NULL DEFAULT 50,
             caller_max   INTEGER NOT NULL DEFAULT 4,
             global_max   INTEGER NOT NULL DEFAULT 4,

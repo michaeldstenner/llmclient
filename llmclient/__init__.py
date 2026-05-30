@@ -177,7 +177,7 @@ class LLMClient:
                 )
             finally:
                 if queue_id is not None:
-                    release(queue_id)
+                    release(queue_id, cfg.model)
 
             result = LLMResult(
                 text=pr.text,
@@ -240,7 +240,7 @@ class LLMClient:
             pr = dispatch_embed(text, cfg, self._url, self._api_key)
         finally:
             if queue_id is not None:
-                release(queue_id)
+                release(queue_id, cfg.model)
 
         result = EmbedResult(
             vector=pr.vector,
