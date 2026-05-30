@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field, replace as _dc_replace
 import threading
 
+from ._config import configure
+
 _RETRYABLE = {
     "timeout:generation", "error:unreachable",
     # legacy names kept for any surviving callers

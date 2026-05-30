@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.5.2] — 2026-05-30
+
+### Added
+
+- **`llmclient.configure(config_dir, queue_db)`** — new module-level
+  function for app-specific configuration.  Call once at startup.
+
+- **`config.yaml`** — new preferred config file name.  Replaces
+  `keys.yaml` (which is still read as a legacy fallback).  The file
+  format is identical; the new name reflects that it holds more than
+  just keys (URLs, `parallel_slots`, etc.).
+
+- **Layered config resolution** — when `configure(config_dir=...)` is
+  called, llmclient reads `{config_dir}/config.yaml` as a top-priority
+  overlay on `~/.config/llmclient/config.yaml`.  Per-key precedence:
+  app config beats global config beats legacy `keys.yaml`.  This lets
+  apps ship their own config without requiring users to maintain a
+  separate llmclient config folder.
+
+- **Per-app queue DB** — `configure(queue_db=...)` redirects the
+  cooperative SQLite queue to a different file.  Apps that want an
+  independent Ollama slot budget can each point at their own DB;
+  apps that want shared slot management can point at the same file.
+  Defaults to `~/.local/share/llmclient/queue.db` (unchanged).
+
 ## [0.5.0] — 2026-05-30
 
 ### Changed

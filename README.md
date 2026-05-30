@@ -99,9 +99,9 @@ Make a synchronous LLM call. Returns an `LLMResult`.
 |-------|---------|-------------|
 | `provider` | — | `"ollama"` \| `"anthropic"` \| `"openai"` \| `"openai_compatible"` \| `"claude_code"` |
 | `model` | — | Model identifier as configured |
-| `url` | (resolved) | Base URL; resolved from `keys.yaml` if empty |
+| `url` | (resolved) | Base URL; resolved from `config.yaml` if empty |
 | `timeout` | 60 | Request timeout in seconds |
-| `api_key` | (resolved) | API key; resolved from env / `keys.yaml` |
+| `api_key` | (resolved) | API key; resolved from env / `config.yaml` |
 | `keep_alive` | `"60m"` | Ollama: keep model resident between calls |
 | `num_ctx_auto` | `True` | Ollama: auto-size context window |
 | `log_caller` | `""` | Caller name for JSONL log; empty = no logging |
@@ -158,15 +158,39 @@ configured default. `url` and `api_key` are ignored.
 
 ---
 
-## Key resolution
+## App-specific configuration
+
+Call `llmclient.configure()` once at application startup to point
+llmclient at your app's config directory and/or a dedicated queue
+database:
+
+```python
+import llmclient
+llmclient.configure(
+    config_dir="~/.config/myapp",   # optional: app-specific overrides
+    queue_db="~/.local/share/myapp/queue.db",  # optional: dedicated queue
+)
+```
+
+Both parameters are optional.  `config_dir` is layered on top of the
+global `~/.config/llmclient/config.yaml`, so shared keys stay in the
+global file and only app-specific values go in the app file.
+`queue_db` defaults to `~/.local/share/llmclient/queue.db` (shared
+across all apps that don't override it).
+
+---
+
+## Key / URL resolution
 
 `url` and `api_key` are resolved in this order (first non-empty wins):
 
 1. Explicit value in `LLMConfig`
 2. Standard env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)
-3. `~/.config/llmclient/keys.yaml`
+3. `{config_dir}/config.yaml` (if `configure(config_dir=...)` was called)
+4. `~/.config/llmclient/config.yaml`
+5. `~/.config/llmclient/keys.yaml` (legacy name, still supported)
 
-**`~/.config/llmclient/keys.yaml`** format:
+**`config.yaml`** format (same for app-specific and global):
 
 ```yaml
 anthropic:

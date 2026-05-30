@@ -163,10 +163,6 @@ def test_call_skips_queue_when_mode_off():
 
 
 def test_call_uses_queue_for_ollama_cooperative(queue_db, monkeypatch):
-    import llmclient._queue as q_mod
-    monkeypatch.setattr(q_mod, "_DB_PATH", queue_db)
-    monkeypatch.setattr(q_mod, "_POLL_S", 0.02)
-
     cfg = LLMConfig(
         provider="ollama", model="test:7b",
         url="http://localhost:11434", api_key="",

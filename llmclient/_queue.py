@@ -32,7 +32,6 @@ import time
 import threading
 from pathlib import Path
 
-_DB_PATH   = Path.home() / ".local" / "share" / "llmclient" / "queue.db"
 _POLL_S    = 0.25
 _log       = logging.getLogger("llmclient.queue")
 
@@ -70,8 +69,10 @@ CREATE TABLE IF NOT EXISTS queue_meta (
 
 
 def _open() -> sqlite3.Connection:
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(_DB_PATH), isolation_level=None, timeout=10)
+    from ._config import get_db_path
+    db_path = get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path), isolation_level=None, timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(_CREATE_QUEUE)
     conn.execute(_CREATE_CIRCUIT)

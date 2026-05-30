@@ -182,8 +182,6 @@ def test_priority_blocking_is_model_scoped(queue_db):
 # ---------------------------------------------------------------------------
 
 def test_acquire_release_round_trip(queue_db, monkeypatch):
-    monkeypatch.setattr(q_mod, "_DB_PATH", queue_db)
-    monkeypatch.setattr(q_mod, "_POLL_S", 0.02)
     from unittest.mock import patch
     with patch("llmclient._keys.get_parallel_slots", return_value=4):
         cfg = make_cfg(log_caller="test", priority=50, caller_max=4, queue_mode="cooperative")
@@ -198,8 +196,6 @@ def test_acquire_release_round_trip(queue_db, monkeypatch):
 
 
 def test_acquire_aborted_immediately(queue_db, monkeypatch):
-    monkeypatch.setattr(q_mod, "_DB_PATH", queue_db)
-    monkeypatch.setattr(q_mod, "_POLL_S", 0.02)
     from unittest.mock import patch
     with patch("llmclient._keys.get_parallel_slots", return_value=4):
         abort = threading.Event()
@@ -214,8 +210,6 @@ def test_acquire_aborted_immediately(queue_db, monkeypatch):
 
 def test_acquire_waits_then_proceeds(queue_db, monkeypatch):
     """A waiter blocked by a full slot eventually runs after release."""
-    monkeypatch.setattr(q_mod, "_DB_PATH", queue_db)
-    monkeypatch.setattr(q_mod, "_POLL_S", 0.02)
     from unittest.mock import patch
 
     with patch("llmclient._keys.get_parallel_slots", return_value=1):
