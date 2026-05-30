@@ -39,7 +39,7 @@ def dispatch(
     if provider == "anthropic":
         from .anthropic import call_anthropic
         return call_anthropic(system, user, cfg, resolved_url, resolved_api_key)
-    if provider == "claude_code":
+    if provider in ("claude_p", "claude_code"):
         from .claude_code import call_claude_code
         return call_claude_code(system, user, cfg, abort_event)
     return _ProviderResult(

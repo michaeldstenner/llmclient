@@ -298,6 +298,20 @@ class LLMClient:
         )
 
     @classmethod
+    def claude_p(
+        cls,
+        model: str = "",
+        *,
+        abort_event: threading.Event | None = None,
+        **kwargs,
+    ) -> "LLMClient":
+        """Alias for claude_code(); preferred name — 'claude -p' (print mode)."""
+        return cls(
+            LLMConfig(provider="claude_p", model=model, queue_mode="off", **kwargs),
+            abort_event=abort_event,
+        )
+
+    @classmethod
     def claude_code(
         cls,
         model: str = "",
@@ -305,6 +319,7 @@ class LLMClient:
         abort_event: threading.Event | None = None,
         **kwargs,
     ) -> "LLMClient":
+        """Kept for backwards compatibility; prefer claude_p()."""
         return cls(
             LLMConfig(provider="claude_code", model=model, queue_mode="off", **kwargs),
             abort_event=abort_event,
