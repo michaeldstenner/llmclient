@@ -71,22 +71,21 @@ def mock_urlopen_url_error():
 
 @pytest.fixture()
 def queue_db(tmp_path, monkeypatch):
-    """Redirect the queue DB to a temp file and speed up polling."""
-    db_path = tmp_path / "queue.db"
+    """Redirect queue DB and log to a temp dir and speed up polling."""
     import llmclient._config as config_mod
     import llmclient._queue as q_mod
-    monkeypatch.setattr(config_mod, "_queue_db", db_path)
+    monkeypatch.setattr(config_mod, "_data_dir", tmp_path)
     monkeypatch.setattr(q_mod, "_POLL_S", 0.02)
-    return db_path
+    return tmp_path / "queue.db"
 
 
 def open_queue_db(db_path: Path) -> sqlite3.Connection:
     import llmclient._config as config_mod
     import llmclient._queue as q_mod
-    old = config_mod._queue_db
-    config_mod._queue_db = db_path
+    old = config_mod._data_dir
+    config_mod._data_dir = db_path.parent
     conn = q_mod._open()
-    config_mod._queue_db = old
+    config_mod._data_dir = old
     return conn
 
 

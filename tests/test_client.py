@@ -129,24 +129,6 @@ def test_call_writes_log_when_caller_set(tmp_path):
     assert log_entries[0] == ("myapp", "test_op", "success")
 
 
-def test_call_skips_log_when_no_caller():
-    cfg = LLMConfig(
-        provider="ollama", model="test:7b",
-        url="http://localhost:11434", api_key="",
-        queue_mode="off", log_caller="",
-    )
-    client = object.__new__(LLMClient)
-    client._cfg   = cfg
-    client._abort = None
-    client._url   = cfg.url
-    client._api_key = ""
-
-    with mock_urlopen(OLLAMA_BODY):
-        with patch("llmclient._log.write_log") as mock_log:
-            client.call("hello")
-
-    mock_log.assert_not_called()
-
 
 # ---------------------------------------------------------------------------
 # Queue integration

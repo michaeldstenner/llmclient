@@ -142,8 +142,7 @@ class LLMClient:
                     prompt_chars=prompt_chars, response_chars=0,
                     prompt_tokens=None, response_tokens=None,
                 )
-                if cfg.log_caller:
-                    write_log(cfg, operation, result, context)
+                write_log(cfg, operation, result, context)
                 return result
             is_probe = (check == "probe")
 
@@ -200,8 +199,7 @@ class LLMClient:
         if cfg.circuit_n > 0 and cfg.log_caller and result is not None:
             circuit_record(cfg, result.outcome, is_probe=is_probe)
 
-        if cfg.log_caller:
-            write_log(cfg, operation, result, context)
+        write_log(cfg, operation, result, context)
         return result
 
     def embed(
@@ -234,8 +232,7 @@ class LLMClient:
                     call_s=0.0, load_s=0.0,
                     prompt_chars=prompt_chars, prompt_tokens=None,
                 )
-                if cfg.log_caller:
-                    write_log(cfg, operation, result, context)
+                write_log(cfg, operation, result, context)
                 return result
 
         try:
@@ -254,8 +251,7 @@ class LLMClient:
             prompt_chars=prompt_chars,
             prompt_tokens=pr.prompt_tokens,
         )
-        if cfg.log_caller:
-            write_log(cfg, operation, result, context)
+        write_log(cfg, operation, result, context)
         return result
 
     # ---------- convenience constructors ----------

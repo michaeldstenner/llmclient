@@ -1,37 +1,11 @@
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
-_LOG_ROOT = Path.home() / ".local" / "share"
-
-_WARN_OUTCOMES = {
-    "timeout:queue_wait",
-    "timeout:queue_stall",
-    "timeout:first_token",
-    "timeout:generation",
-    "circuit_open",
-    "error:unreachable",
-    # legacy names
-    "timeout",
-    "timeout:model_loaded_but_slow",
-    "timeout:model_not_loaded",
-}
-
-
-def _outcome_level(outcome: str) -> str:
-    if outcome == "success":
-        return "ok"
-    if outcome in ("aborted",):
-        return "ok"
-    if outcome in _WARN_OUTCOMES:
-        return "warn"
-    return "error"
-
-
-def _level_value(level: str) -> int:
-    return {"ok": 0, "warn": 1, "error": 2}.get(level, 1)
+def _is_error(outcome: str) -> bool:
+    return outcome not in ("success", "aborted")
 
 
 def _read_log(path: Path) -> list[dict]:
@@ -51,23 +25,15 @@ def _read_log(path: Path) -> list[dict]:
     return entries
 
 
-def _all_log_files() -> list[Path]:
-    if not _LOG_ROOT.exists():
-        return []
-    return sorted(_LOG_ROOT.glob("*/llm_calls.jsonl"))
-
-
 def _format_entry(entry: dict) -> str:
     ts      = entry.get("timestamp", "")
-    caller  = entry.get("caller", "?")
+    caller  = entry.get("caller", "?") or "?"
     outcome = entry.get("outcome", "?")
-    level   = _outcome_level(outcome)
-    label   = level.upper()
+    label   = "ERR" if _is_error(outcome) else "ok"
 
-    # short timestamp: HH:MM:SS if today, else MM-DD HH:MM:SS
     try:
-        dt  = datetime.fromisoformat(ts)
-        now = datetime.now()
+        dt  = datetime.fromisoformat(ts).astimezone()
+        now = datetime.now(timezone.utc).astimezone()
         if dt.date() == now.date():
             ts_str = dt.strftime("%H:%M:%S")
         else:
@@ -75,14 +41,14 @@ def _format_entry(entry: dict) -> str:
     except Exception:
         ts_str = ts[:19]
 
-    wait_s  = entry.get("queue_wait_s", 0.0) or 0.0
-    call_s  = entry.get("call_s", 0.0) or 0.0
-    model   = entry.get("model", "")
-    model   = model.split(":")[0] if model else ""   # strip tag
+    wait_s = entry.get("queue_wait_s", 0.0) or 0.0
+    call_s = entry.get("call_s", 0.0) or 0.0
+    model  = entry.get("model", "")
+    model  = model.split(":")[0] if model else ""
 
     timing = f"{wait_s:.1f}s queue + {call_s:.1f}s call"
     line = (
-        f"{ts_str}  {caller:<12} {label:<5}  {outcome:<28}  "
+        f"{ts_str}  {caller:<12} {label:<4}  {outcome:<28}  "
         f"{timing}  [{model}]"
     )
 
@@ -107,50 +73,34 @@ def _format_entry(entry: dict) -> str:
 
 
 def cmd_log(args) -> None:
-    min_level  = _level_value(args.level)
+    from llmclient._config import get_log_path
+    show_all   = getattr(args, "level", "errors") == "all"
     last_n     = args.last
     caller_flt = getattr(args, "caller", None)
     emit_json  = getattr(args, "json", False)
 
-    # collect log files
-    if caller_flt:
-        files = [_LOG_ROOT / caller_flt / "llm_calls.jsonl"]
-    else:
-        files = _all_log_files()
-
-    if not files:
-        print("no log files found under ~/.local/share/*/llm_calls.jsonl",
-              file=sys.stderr)
+    log_path = get_log_path()
+    if not log_path.exists():
+        print(f"no log found at {log_path}", file=sys.stderr)
         return
 
-    # read and merge
-    all_entries: list[dict] = []
-    for path in files:
-        all_entries.extend(_read_log(path))
+    entries = _read_log(log_path)
+    entries.sort(key=lambda e: e.get("timestamp", ""))
 
-    # sort by timestamp
-    def _ts_key(e: dict) -> str:
-        return e.get("timestamp", "")
-
-    all_entries.sort(key=_ts_key)
-
-    # filter by level
-    filtered = [
-        e for e in all_entries
-        if _level_value(_outcome_level(e.get("outcome", ""))) >= min_level
-    ]
-
-    # take last N
+    if not show_all:
+        entries = [e for e in entries if _is_error(e.get("outcome", ""))]
+    if caller_flt:
+        entries = [e for e in entries if e.get("caller") == caller_flt]
     if last_n > 0:
-        filtered = filtered[-last_n:]
+        entries = entries[-last_n:]
 
-    if not filtered:
+    if not entries:
         print("(no matching log entries)")
         return
 
     if emit_json:
-        print(json.dumps(filtered, indent=2))
+        print(json.dumps(entries, indent=2))
         return
 
-    for entry in filtered:
+    for entry in entries:
         print(_format_entry(entry))

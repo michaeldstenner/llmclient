@@ -160,23 +160,41 @@ configured default. `url` and `api_key` are ignored.
 
 ## App-specific configuration
 
-Call `llmclient.configure()` once at application startup to point
-llmclient at your app's config directory and/or a dedicated queue
-database:
+Call `llmclient.configure()` once at application startup:
 
 ```python
 import llmclient
 llmclient.configure(
-    config_dir="~/.config/myapp",   # optional: app-specific overrides
-    queue_db="~/.local/share/myapp/queue.db",  # optional: dedicated queue
+    config_dir="~/.config/myapp",      # app-specific config overlay
+    data_dir="~/.local/share/myapp",   # dedicated queue + log dir
+    log_level="all",                   # "off" | "errors" | "all"
 )
 ```
 
-Both parameters are optional.  `config_dir` is layered on top of the
-global `~/.config/llmclient/config.yaml`, so shared keys stay in the
-global file and only app-specific values go in the app file.
-`queue_db` defaults to `~/.local/share/llmclient/queue.db` (shared
-across all apps that don't override it).
+All parameters are optional.
+
+`config_dir` is layered on top of `~/.config/llmclient/config.yaml` —
+shared keys stay in the global file; only app-specific values go in
+the app file.
+
+`data_dir` controls where `queue.db` and `llmclient_log.jsonl` live.
+Apps sharing a `data_dir` share both a queue and a log.  Apps that
+want independent Ollama slot budgets should each point at a separate
+directory.  Defaults to `~/.local/share/llmclient/`.
+
+`log_level`:
+- `"off"` — nothing logged
+- `"errors"` — non-success outcomes only (default)
+- `"all"` — every call; queue snapshot always included
+
+### Viewing logs
+
+```
+llmc log                # non-success entries from default data dir
+llmc log --all          # all entries
+llmc log --caller bouncer --last 20
+llmc --dir ~/.local/share/bouncer/ log --all
+```
 
 ---
 

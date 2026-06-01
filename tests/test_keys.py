@@ -16,8 +16,10 @@ def _clear_cache():
 
 @pytest.fixture(autouse=True)
 def reset_config(monkeypatch):
-    """Isolate each test: no caller-set config_dir, fresh cache."""
+    """Isolate each test: default config state and fresh cache."""
     monkeypatch.setattr(config_mod, "_config_dir", None)
+    monkeypatch.setattr(config_mod, "_data_dir", None)
+    monkeypatch.setattr(config_mod, "_log_level", "errors")
     _clear_cache()
     yield
     _clear_cache()

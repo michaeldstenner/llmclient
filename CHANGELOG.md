@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.6.0] — 2026-05-31
+
+### Changed
+
+- **Central log replaces per-caller logs.**  All calls now write to
+  `llmclient_log.jsonl` in the data directory (default
+  `~/.local/share/llmclient/`).  Multiple processes sharing a data
+  dir share a single log; `fcntl.flock` serialises concurrent writes.
+  The old per-caller `~/.local/share/<caller>/llm_calls.jsonl` files
+  are no longer written.
+
+- **`configure()` gains `data_dir` and `log_level`; removes `queue_db`.**
+  `data_dir` is the new home for both `queue.db` and
+  `llmclient_log.jsonl`.  `queue_db` (added in 0.5.2) is removed —
+  use `data_dir` instead.  `log_level` controls what gets written:
+  `"off"`, `"errors"` (default, non-success only), or `"all"` (every
+  call, with queue snapshot always included).
+
+- **Logging is always-on.**  `write_log` is called for every call
+  regardless of whether `log_caller` is set.  `log_caller` remains a
+  metadata field in log entries to identify the caller; it no longer
+  gates logging.
+
+- **Queue snapshot at `all` level.**  When `log_level="all"`, the
+  queue state is captured on every call (not just timeouts) so you
+  can see what was running concurrently at the time of any call.
+
+### Changed (CLI)
+
+- **`llmc --dir PATH`** — global flag that sets the data directory
+  before any subcommand runs.  Use this to inspect a specific app's
+  queue and log: `llmc --dir ~/.local/share/bouncer/ log`.
+
+- **`llmc log` flags simplified** — `--errors` (default) shows
+  non-success outcomes; `--all` shows everything.  The old `--warn` /
+  `--error` distinction is removed.
+
 ## [0.5.2] — 2026-05-30
 
 ### Added

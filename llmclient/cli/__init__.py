@@ -7,6 +7,10 @@ def main() -> None:
         prog="llmc",
         description="llmclient CLI — probe and diagnose LLM backends",
     )
+    parser.add_argument(
+        "--dir", metavar="PATH",
+        help="data directory for queue.db and log (overrides default)",
+    )
     sub = parser.add_subparsers(dest="cmd", metavar="COMMAND")
 
     sub.add_parser("status", help="Ollama state, connections, queue")
@@ -15,18 +19,14 @@ def main() -> None:
     p_log = sub.add_parser("log", help="Show recent LLM call log entries")
     _lvl = p_log.add_mutually_exclusive_group()
     _lvl.add_argument(
-        "--warn", dest="level", action="store_const", const="warn",
-        help="show warnings and errors (default)",
+        "--errors", dest="level", action="store_const", const="errors",
+        help="show non-success outcomes only (default)",
     )
     _lvl.add_argument(
-        "--error", dest="level", action="store_const", const="error",
-        help="show errors only",
-    )
-    _lvl.add_argument(
-        "--all", dest="level", action="store_const", const="ok",
+        "--all", dest="level", action="store_const", const="all",
         help="show all entries including successes",
     )
-    p_log.set_defaults(level="warn")
+    p_log.set_defaults(level="errors")
     p_log.add_argument(
         "--last", type=int, default=5, metavar="N",
         help="show last N matching entries (default: 5)",
@@ -67,6 +67,10 @@ def main() -> None:
     p_par.add_argument("-t", "--timeout", type=int, default=120)
 
     args = parser.parse_args()
+
+    if args.dir:
+        from llmclient import configure
+        configure(data_dir=args.dir)
 
     if args.cmd == "status":
         from ._status import cmd_status
