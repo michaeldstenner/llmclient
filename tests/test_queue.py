@@ -269,6 +269,28 @@ def test_circuit_migrates_legacy_caller_primary_key(queue_db):
     assert rows == [("bouncer", "bouncer", 2, 2.0)]
 
 
+def test_circuit_check_fails_open_when_db_open_fails(monkeypatch):
+    cfg = make_cfg(log_caller="bouncer", circuit_n=1)
+
+    def raise_open():
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(q_mod, "_open", raise_open)
+
+    assert circuit_check(cfg) == "proceed"
+
+
+def test_circuit_record_ignores_db_open_failure(monkeypatch):
+    cfg = make_cfg(log_caller="bouncer", circuit_n=1)
+
+    def raise_open():
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(q_mod, "_open", raise_open)
+
+    circuit_record(cfg, "error:unreachable", is_probe=False)
+
+
 # ---------------------------------------------------------------------------
 # acquire / release
 # ---------------------------------------------------------------------------

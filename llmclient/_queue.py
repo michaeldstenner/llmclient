@@ -384,8 +384,9 @@ def circuit_check(cfg) -> str:
     now      = time.time()
     cooldown = cfg.circuit_cooldown_s
 
-    conn = _open()
+    conn = None
     try:
+        conn = _open()
         conn.execute("BEGIN IMMEDIATE")
 
         row = conn.execute(
@@ -441,12 +442,14 @@ def circuit_check(cfg) -> str:
 
     except Exception:
         try:
-            conn.execute("ROLLBACK")
+            if conn is not None:
+                conn.execute("ROLLBACK")
         except Exception:
             pass
         return "proceed"
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def circuit_record(cfg, outcome: str, is_probe: bool) -> None:
@@ -466,8 +469,9 @@ def circuit_record(cfg, outcome: str, is_probe: bool) -> None:
     triggers = set(cfg.circuit_triggers)
     now      = time.time()
 
-    conn = _open()
+    conn = None
     try:
+        conn = _open()
         conn.execute("BEGIN IMMEDIATE")
 
         row = conn.execute(
@@ -532,11 +536,13 @@ def circuit_record(cfg, outcome: str, is_probe: bool) -> None:
         conn.execute("COMMIT")
     except Exception:
         try:
-            conn.execute("ROLLBACK")
+            if conn is not None:
+                conn.execute("ROLLBACK")
         except Exception:
             pass
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def _circuit_key(cfg) -> str:
