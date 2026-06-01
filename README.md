@@ -115,6 +115,7 @@ Make a synchronous LLM call. Returns an `LLMResult`.
 | `retries` | 0 | Retry attempts on `timeout:generation` / unreachable (0 = no retries) |
 | `retry_delay` | 15 | Seconds to wait between retries |
 | `circuit_n` | 0 | Trip circuit after N consecutive triggering failures (0 = disabled) |
+| `circuit_key` | `""` | Optional circuit scope override; defaults to `log_caller` |
 | `circuit_cooldown_s` | 120.0 | Seconds before a tripped circuit allows a probe request |
 | `circuit_triggers` | see below | Outcome strings that increment the failure counter |
 | `extra_params` | `{}` | Pass-through to provider payload |
@@ -321,11 +322,15 @@ into two phases with independent deadlines:
 ### Circuit breaker
 
 Set `circuit_n > 0` to enable. After `circuit_n` consecutive triggering
-failures for a given `log_caller`, the circuit trips for
+failures for a given circuit key, the circuit trips for
 `circuit_cooldown_s` seconds. During that window, calls return
 `"circuit_open"` immediately without touching Ollama. After the cooldown,
 one probe request is allowed through; success resets the circuit, failure
 restarts the cooldown.
+
+By default the circuit key is `log_caller`, preserving caller-wide circuit
+behavior. Set `circuit_key` to a more specific value when one caller needs
+independent circuit state for different backends, models, or test fixtures.
 
 Circuit state is stored in the same SQLite DB as the queue
 (`circuit_state` table), so it is shared across processes.

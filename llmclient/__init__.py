@@ -30,6 +30,7 @@ class LLMConfig:
     retries:             int        = 0
     retry_delay:         int        = 15
     circuit_n:           int        = 0
+    circuit_key:         str        = ""
     circuit_cooldown_s:  float      = 120.0
     circuit_triggers:    tuple      = (
         "timeout:queue_wait",
@@ -132,7 +133,8 @@ class LLMClient:
 
         # Circuit breaker check — once before all attempts.
         is_probe = False
-        if cfg.circuit_n > 0 and cfg.log_caller:
+        circuit_enabled = cfg.circuit_n > 0 and (cfg.circuit_key or cfg.log_caller)
+        if circuit_enabled:
             check = circuit_check(cfg)
             if check == "open":
                 result = LLMResult(
@@ -196,7 +198,7 @@ class LLMClient:
             if result.outcome not in _RETRYABLE:
                 break
 
-        if cfg.circuit_n > 0 and cfg.log_caller and result is not None:
+        if circuit_enabled and result is not None:
             circuit_record(cfg, result.outcome, is_probe=is_probe)
 
         write_log(cfg, operation, result, context)

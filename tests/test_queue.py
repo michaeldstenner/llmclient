@@ -13,7 +13,14 @@ from pathlib import Path
 import pytest
 
 import llmclient._queue as q_mod
-from llmclient._queue import acquire, release, _try_promote, _delete_row
+from llmclient._queue import (
+    acquire,
+    release,
+    circuit_check,
+    circuit_record,
+    _try_promote,
+    _delete_row,
+)
 from tests.conftest import make_cfg
 
 
@@ -71,6 +78,17 @@ def _count(db_path, status) -> int:
     ).fetchone()[0]
     conn.close()
     return n
+
+
+def _circuit_rows(db_path) -> list[tuple]:
+    conn = q_mod._open()
+    try:
+        return conn.execute(
+            "SELECT circuit_key, caller, consecutive_n, tripped_at "
+            "FROM circuit_state ORDER BY circuit_key"
+        ).fetchall()
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +193,80 @@ def test_priority_blocking_is_model_scoped(queue_db):
                   model="nomic-embed-text", caller_max=4)
     # squirrel should promote — the bouncer waiter is for a different model
     assert _try_promote(low, "squirrel", "nomic-embed-text", 10, 4, 4) is True
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker
+# ---------------------------------------------------------------------------
+
+def test_circuit_defaults_to_log_caller_scope(queue_db):
+    cfg_a = make_cfg(
+        log_caller="bouncer",
+        model="broken-model",
+        circuit_n=1,
+    )
+    cfg_b = make_cfg(
+        log_caller="bouncer",
+        model="good-model",
+        circuit_n=1,
+    )
+
+    circuit_record(cfg_a, "error:unreachable", is_probe=False)
+
+    assert circuit_check(cfg_b) == "open"
+    rows = _circuit_rows(queue_db)
+    assert len(rows) == 1
+    assert rows[0][0] == "bouncer"
+    assert rows[0][1] == "bouncer"
+
+
+def test_circuit_key_can_isolate_same_caller(queue_db):
+    cfg_a = make_cfg(
+        log_caller="bouncer",
+        model="broken-model",
+        circuit_n=1,
+        circuit_key="bouncer|broken-model",
+    )
+    cfg_b = make_cfg(
+        log_caller="bouncer",
+        model="good-model",
+        circuit_n=1,
+        circuit_key="bouncer|good-model",
+    )
+
+    circuit_record(cfg_a, "error:unreachable", is_probe=False)
+
+    assert circuit_check(cfg_a) == "open"
+    assert circuit_check(cfg_b) == "proceed"
+    assert [row[0] for row in _circuit_rows(queue_db)] == [
+        "bouncer|broken-model",
+        "bouncer|good-model",
+    ]
+
+
+def test_circuit_migrates_legacy_caller_primary_key(queue_db):
+    conn = sqlite3.connect(str(queue_db), isolation_level=None, timeout=5)
+    try:
+        conn.execute("""
+            CREATE TABLE circuit_state (
+                caller          TEXT    PRIMARY KEY,
+                consecutive_n   INTEGER NOT NULL DEFAULT 0,
+                last_failure_at REAL,
+                tripped_at      REAL,
+                probe_pid       INTEGER
+            )
+        """)
+        conn.execute(
+            "INSERT INTO circuit_state "
+            "(caller, consecutive_n, last_failure_at, tripped_at, probe_pid) "
+            "VALUES ('bouncer', 2, 1.0, 2.0, NULL)"
+        )
+    finally:
+        conn.close()
+
+    rows = _circuit_rows(queue_db)
+
+    assert rows == [("bouncer", "bouncer", 2, 2.0)]
 
 
 # ---------------------------------------------------------------------------
