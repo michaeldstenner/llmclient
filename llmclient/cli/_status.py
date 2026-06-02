@@ -312,23 +312,17 @@ def cmd_status(args) -> None:
 
 def cmd_reset(args) -> None:
     from .._config import get_db_path
+    from .._queue import _open
     db = get_db_path()
     if not db.exists():
         print("queue.db not found — nothing to reset")
         return
-    conn = sqlite3.connect(str(db))
+    # _open() applies all schema migrations (incl. the circuit_key re-key),
+    # so reset works against a DB created by any llmclient version.
+    conn = _open()
     try:
-        # Ensure futility-mode columns exist (older DBs predate them).
-        for _alter in (
-            "ALTER TABLE circuit_state ADD COLUMN llr REAL NOT NULL DEFAULT 0.0",
-            "ALTER TABLE circuit_state ADD COLUMN llr_updated_at REAL",
-        ):
-            try:
-                conn.execute(_alter)
-            except Exception:
-                pass
         rows = conn.execute(
-            "SELECT caller, consecutive_n, llr FROM circuit_state"
+            "SELECT circuit_key, caller, consecutive_n, llr FROM circuit_state"
             " WHERE tripped_at IS NOT NULL"
         ).fetchall()
         if not rows:
@@ -342,10 +336,11 @@ def cmd_reset(args) -> None:
             " WHERE tripped_at IS NOT NULL"
         )
         conn.commit()
-        for caller, n, llr in rows:
+        for key, caller, n, llr in rows:
             detail = f"consecutive_n was {n}" if (llr or 0.0) == 0.0 \
                 else f"llr was {llr:.2f}"
-            print(f"  reset  {caller}  ({detail})")
+            label = key if (not caller or caller == key) else f"{key} ({caller})"
+            print(f"  reset  {label}  ({detail})")
     finally:
         conn.close()
 

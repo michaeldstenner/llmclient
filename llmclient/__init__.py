@@ -30,6 +30,9 @@ class LLMConfig:
     retries:             int        = 0
     retry_delay:         int        = 15
     circuit_n:           int        = 0
+    # Scopes breaker state; empty falls back to log_caller.  Set e.g.
+    # "<caller>|<provider>|<model>|<url>" to scope per endpoint rather than
+    # globally per caller.  Applies to both circuit modes.
     circuit_key:         str        = ""
     circuit_cooldown_s:  float      = 120.0
     circuit_triggers:    tuple      = (
@@ -144,12 +147,13 @@ class LLMClient:
 
         # Circuit breaker check — once before all attempts.  Two modes:
         # "count" (consecutive-failure counter) and "futility" (leaky-LLR).
+        breaker_key = cfg.circuit_key or cfg.log_caller
         use_futility = (
             getattr(cfg, "circuit_mode", "count") == "futility"
-            and bool(cfg.log_caller)
+            and bool(breaker_key)
         )
         use_count = (
-            not use_futility and cfg.circuit_n > 0 and bool(cfg.log_caller)
+            not use_futility and cfg.circuit_n > 0 and bool(breaker_key)
         )
 
         sensor   = None

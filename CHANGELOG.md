@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.8.0] — 2026-06-02
+
+### Added
+
+- **`circuit_key` — configurable breaker scope.**  New optional
+  `LLMConfig` field (default `""`).  When empty it falls back to
+  `log_caller`, so existing callers keep their per-caller breaker
+  unchanged.  Set it to scope the breaker more narrowly — e.g.
+  `"bouncer|<provider>|<model>|<url>"` so switching model or endpoint
+  doesn't share one trip state.  Applies to **both** `circuit_mode`
+  values (count and futility).
+
+### Changed
+
+- `circuit_state` is now keyed on `circuit_key` (was `caller`); `caller`
+  is retained as a metadata column for diagnostics / `llmc reset` output.
+  Existing DBs are auto-migrated on open (the old `caller` PRIMARY KEY
+  becomes the seed `circuit_key`); the migration composes with the
+  v0.7.0 `llr`/`llr_updated_at` add-columns from any starting point.
+- The breaker no-op gate now keys on `circuit_key or log_caller`.
+- `llmc reset` reads/clears by `circuit_key` and shows `caller` when it
+  differs.
+
+No API removals; `circuit_key` is additive and defaults to prior
+behavior.  No `outcome` strings changed.
+
 ## [0.7.0] — 2026-06-02
 
 ### Added

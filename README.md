@@ -115,13 +115,13 @@ Make a synchronous LLM call. Returns an `LLMResult`.
 | `retries` | 0 | Retry attempts on `timeout:generation` / unreachable (0 = no retries) |
 | `retry_delay` | 15 | Seconds to wait between retries |
 | `circuit_n` | 0 | Trip circuit after N consecutive triggering failures (0 = disabled) |
-| `circuit_key` | `""` | Optional circuit scope override; defaults to `log_caller` |
+| `circuit_key` | `""` | Scopes breaker state; empty falls back to `log_caller`. Set e.g. `"<caller>\|<provider>\|<model>\|<url>"` to scope per endpoint instead of per caller. Applies to both circuit modes |
 | `circuit_cooldown_s` | 120.0 | Seconds before a tripped circuit allows a probe request |
 | `circuit_triggers` | see below | Outcome strings that increment the failure counter |
 | `extra_params` | `{}` | Pass-through to provider payload |
 
 Default `circuit_triggers`:
-`("timeout:queue_wait", "timeout:first_token", "error:unreachable")`.
+`("timeout:first_token", "error:unreachable")`.
 `timeout:generation` is intentionally excluded — inference started, the
 model is not unavailable.
 

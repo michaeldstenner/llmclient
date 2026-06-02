@@ -54,29 +54,30 @@ def _fut_cfg(**kw):
     return make_cfg(**base)
 
 
-def _state(caller="tester"):
+def _state(key="tester"):
     conn = q_mod._open()
     try:
         return conn.execute(
-            "SELECT llr, tripped_at, probe_pid FROM circuit_state WHERE caller=?",
-            [caller],
+            "SELECT llr, tripped_at, probe_pid FROM circuit_state "
+            "WHERE circuit_key=?",
+            [key],
         ).fetchone()
     finally:
         conn.close()
 
 
-def _set_state(caller="tester", *, llr=0.0, updated=None, tripped=None,
+def _set_state(key="tester", *, llr=0.0, updated=None, tripped=None,
                probe_pid=None):
     conn = q_mod._open()
     try:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
-            "INSERT INTO circuit_state (caller, consecutive_n, llr, "
-            "llr_updated_at, tripped_at, probe_pid) VALUES (?,0,?,?,?,?) "
-            "ON CONFLICT(caller) DO UPDATE SET llr=excluded.llr, "
+            "INSERT INTO circuit_state (circuit_key, caller, consecutive_n, "
+            "llr, llr_updated_at, tripped_at, probe_pid) VALUES (?,?,0,?,?,?,?) "
+            "ON CONFLICT(circuit_key) DO UPDATE SET llr=excluded.llr, "
             "llr_updated_at=excluded.llr_updated_at, "
             "tripped_at=excluded.tripped_at, probe_pid=excluded.probe_pid",
-            [caller, llr, updated, tripped, probe_pid],
+            [key, key, llr, updated, tripped, probe_pid],
         )
         conn.execute("COMMIT")
     finally:
@@ -299,3 +300,77 @@ def test_acquire_grace_suppresses_stall_bail(queue_db):
         # ceiling at 0.3s instead of bailing on stall at 0.01s.
         assert reason == "queue_timeout"
         assert wait_s < 5.0
+
+
+# ---------------------------------------------------------------------------
+# circuit_key scoping + migration
+# ---------------------------------------------------------------------------
+
+def test_circuit_key_falls_back_to_caller(queue_db):
+    """With no circuit_key, breaker state keys on log_caller (back-compat)."""
+    cfg = _fut_cfg(log_caller="svc")
+    futility_update(cfg, FakeSensor({"x": 5.0}, boundary=4.0), "x",
+                    CallContext(), is_probe=False)
+    row = _state("svc")                          # keyed by the caller name
+    assert row is not None
+    assert row[0] == pytest.approx(5.0, abs=0.1)
+
+
+def test_circuit_key_scopes_independently(queue_db):
+    """Same caller, different circuit_key → independent breaker state."""
+    sensor = FakeSensor({"x": 5.0}, boundary=4.0)
+    a = _fut_cfg(log_caller="svc", circuit_key="svc|m1")
+    b = _fut_cfg(log_caller="svc", circuit_key="svc|m2")
+    futility_update(a, sensor, "x", CallContext(), is_probe=False)
+    assert _state("svc|m1") is not None          # m1 tripped
+    assert _state("svc|m2") is None              # m2 untouched
+    assert futility_check(b, sensor) == "proceed"
+
+
+def test_count_mode_keys_on_circuit_key(queue_db):
+    from llmclient._queue import circuit_check, circuit_record
+    cfg = make_cfg(log_caller="svc", circuit_key="svc|m1",
+                   circuit_n=1, circuit_triggers=("error:unreachable",))
+    assert circuit_check(cfg) == "proceed"
+    circuit_record(cfg, "error:unreachable", is_probe=False)
+    conn = q_mod._open()
+    try:
+        row = conn.execute(
+            "SELECT tripped_at, caller FROM circuit_state WHERE circuit_key=?",
+            ["svc|m1"],
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None and row[0] is not None
+    assert row[1] == "svc"                        # caller kept as metadata
+    assert circuit_check(cfg) == "open"
+
+
+def test_migration_rekeys_caller_to_circuit_key(queue_db):
+    """An old caller-PK circuit_state migrates to circuit_key on open."""
+    import sqlite3
+    queue_db.parent.mkdir(parents=True, exist_ok=True)
+    raw = sqlite3.connect(str(queue_db))
+    raw.execute(
+        "CREATE TABLE circuit_state ("
+        " caller TEXT PRIMARY KEY, consecutive_n INTEGER NOT NULL DEFAULT 0,"
+        " last_failure_at REAL, tripped_at REAL, probe_pid INTEGER)"
+    )
+    raw.execute(
+        "INSERT INTO circuit_state (caller, consecutive_n, tripped_at) "
+        "VALUES ('legacy', 3, 123.0)"
+    )
+    raw.commit()
+    raw.close()
+    conn = q_mod._open()                          # triggers the migration
+    try:
+        cols = {r[1] for r in
+                conn.execute("PRAGMA table_info(circuit_state)").fetchall()}
+        assert "circuit_key" in cols and "llr" in cols
+        row = conn.execute(
+            "SELECT circuit_key, caller, consecutive_n, tripped_at, llr "
+            "FROM circuit_state WHERE circuit_key='legacy'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == ("legacy", "legacy", 3, 123.0, 0.0)
