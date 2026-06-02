@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.7.0] — 2026-06-02
+
+### Added
+
+- **Futility circuit breaker (`circuit_mode: "futility"`).**  Opt-in
+  alternative to the consecutive-failure counter.  Models the breaker as a
+  sequential, irreversible stopping decision rather than a binary
+  classifier: a leaky log-likelihood-ratio accumulator (Wald SPRT with a
+  forgetting factor) decides when continued waiting is futile.  See
+  `docs/futility-circuit-breaker.md`.
+  - New `LLMConfig` fields (all optional, defaults preserve old behavior):
+    `circuit_mode` (`"count"` default | `"futility"`), `grace_s`,
+    `deadline_s`, `ps_probe`, `ps_url`.
+  - New outcome string `circuit_futile` (emitted when the futility breaker
+    is open), alongside the existing `circuit_open` for count mode.
+  - Provider-agnostic core via a `FutilitySensor` interface (`_sensor.py`):
+    `OllamaSensor` (cheap `/api/ps` liveness probe + queue-aware weighting)
+    and `DefaultSensor` (HTTP-outcome weights for cloud providers, no probe
+    — the breaker degrades cleanly to "outcome-weighted LLR + deadline").
+  - Per-provider evidence weights and self-heal constant in
+    `_breaker_params.py` (hand-set defaults; refit from logs via
+    `scripts/fit_breaker_params.py` once `log_level="all"` data exists).
+  - `circuit_state` gains `llr` / `llr_updated_at` columns (auto-migrated).
+  - `llmc reset` now also clears the LLR accumulator.
+
+Count mode (`circuit_n`, `circuit_cooldown_s`, `circuit_triggers`,
+`circuit_open`) is unchanged and remains the default; no consumer behavior
+changes until `circuit_mode: "futility"` is set.
+
+## [0.6.2] — 2026-06-02
+
+### Fixed
+
+- **`timeout:queue_wait` no longer trips the circuit breaker.**  It was
+  in the default `circuit_triggers`, but queue-wait timeouts are
+  caller-side congestion (the caller filled its own `caller_max` slots),
+  not an Ollama-health signal.  Counting them caused a self-reinforcing
+  false-positive loop: load → self-congestion → queue-wait timeout →
+  trip, even with a perfectly healthy backend.  Triggers are now
+  `timeout:first_token` and `error:unreachable` only.
+
 ## [0.6.1] — 2026-06-02
 
 ### Added

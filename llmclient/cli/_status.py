@@ -318,8 +318,17 @@ def cmd_reset(args) -> None:
         return
     conn = sqlite3.connect(str(db))
     try:
+        # Ensure futility-mode columns exist (older DBs predate them).
+        for _alter in (
+            "ALTER TABLE circuit_state ADD COLUMN llr REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE circuit_state ADD COLUMN llr_updated_at REAL",
+        ):
+            try:
+                conn.execute(_alter)
+            except Exception:
+                pass
         rows = conn.execute(
-            "SELECT caller, consecutive_n FROM circuit_state"
+            "SELECT caller, consecutive_n, llr FROM circuit_state"
             " WHERE tripped_at IS NOT NULL"
         ).fetchall()
         if not rows:
@@ -328,12 +337,15 @@ def cmd_reset(args) -> None:
             return
         conn.execute(
             "UPDATE circuit_state"
-            " SET consecutive_n=0, tripped_at=NULL, probe_pid=NULL"
+            " SET consecutive_n=0, tripped_at=NULL, probe_pid=NULL,"
+            "     llr=0.0, llr_updated_at=NULL"
             " WHERE tripped_at IS NOT NULL"
         )
         conn.commit()
-        for caller, n in rows:
-            print(f"  reset  {caller}  (consecutive_n was {n})")
+        for caller, n, llr in rows:
+            detail = f"consecutive_n was {n}" if (llr or 0.0) == 0.0 \
+                else f"llr was {llr:.2f}"
+            print(f"  reset  {caller}  ({detail})")
     finally:
         conn.close()
 

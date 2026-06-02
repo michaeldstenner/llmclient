@@ -33,10 +33,18 @@ class LLMConfig:
     circuit_key:         str        = ""
     circuit_cooldown_s:  float      = 120.0
     circuit_triggers:    tuple      = (
-        "timeout:queue_wait",
         "timeout:first_token",
         "error:unreachable",
     )
+    # Futility circuit breaker (opt-in; see docs/futility-circuit-breaker.md).
+    # circuit_mode="count" (default) keeps the consecutive-failure counter
+    # above.  "futility" uses the leaky-LLR breaker driven by grace_s /
+    # deadline_s and a per-provider FutilitySensor.
+    circuit_mode:        str        = "count"
+    grace_s:             float      = 0.0
+    deadline_s:          float|None = None
+    ps_probe:            bool       = False
+    ps_url:              str        = ""
     extra_params: dict = field(default_factory=dict)
 
 
@@ -116,7 +124,10 @@ class LLMClient:
         extra_params: dict | None = None,
     ) -> LLMResult:
         import time
-        from ._queue import acquire, release, circuit_check, circuit_record
+        from ._queue import (
+            acquire, release, circuit_check, circuit_record,
+            futility_check, futility_update,
+        )
         from .providers import dispatch
         from ._log import write_log
 
@@ -131,10 +142,34 @@ class LLMClient:
         prompt_chars = len(system) + len(user)
         attempts     = cfg.retries + 1
 
-        # Circuit breaker check — once before all attempts.
+        # Circuit breaker check — once before all attempts.  Two modes:
+        # "count" (consecutive-failure counter) and "futility" (leaky-LLR).
+        use_futility = (
+            getattr(cfg, "circuit_mode", "count") == "futility"
+            and bool(cfg.log_caller)
+        )
+        use_count = (
+            not use_futility and cfg.circuit_n > 0 and bool(cfg.log_caller)
+        )
+
+        sensor   = None
         is_probe = False
-        circuit_enabled = cfg.circuit_n > 0 and (cfg.circuit_key or cfg.log_caller)
-        if circuit_enabled:
+        if use_futility:
+            from ._sensor import get_sensor
+            sensor = get_sensor(cfg.provider, cfg)
+            check  = futility_check(cfg, sensor)
+            if check == "open":
+                result = LLMResult(
+                    text=None, outcome="circuit_futile",
+                    total_s=0.0, queue_wait_s=0.0, call_s=0.0,
+                    inference_s=0.0, load_s=0.0,
+                    prompt_chars=prompt_chars, response_chars=0,
+                    prompt_tokens=None, response_tokens=None,
+                )
+                write_log(cfg, operation, result, context)
+                return result
+            is_probe = (check == "probe")
+        elif use_count:
             check = circuit_check(cfg)
             if check == "open":
                 result = LLMResult(
@@ -148,6 +183,19 @@ class LLMClient:
                 return result
             is_probe = (check == "probe")
 
+        # In futility mode, deadline_s caps the queue-wait phase (reusing the
+        # queue_timeout ceiling) and grace_s gates the stall ("not advancing")
+        # bail.  The active call is still bounded by first_token/generation
+        # timeouts.
+        acquire_cfg   = cfg
+        acquire_grace = 0.0
+        if use_futility:
+            acquire_grace = cfg.grace_s or 0.0
+            if cfg.deadline_s is not None:
+                qt = (cfg.deadline_s if cfg.queue_timeout is None
+                      else min(cfg.queue_timeout, cfg.deadline_s))
+                acquire_cfg = _dc_replace(cfg, queue_timeout=qt)
+
         result = None
         for attempt in range(attempts):
             if attempt > 0:
@@ -156,7 +204,8 @@ class LLMClient:
             queue_wait_s = 0.0
             queue_id     = None
             if cfg.queue_mode == "cooperative" and cfg.provider == "ollama":
-                queue_id, queue_wait_s, queue_reason, queue_snap = acquire(cfg, self._abort)
+                queue_id, queue_wait_s, queue_reason, queue_snap = acquire(
+                    acquire_cfg, self._abort, grace_s=acquire_grace)
                 if queue_id is None:
                     outcome = (
                         "aborted"             if queue_reason == "aborted"
@@ -198,8 +247,26 @@ class LLMClient:
             if result.outcome not in _RETRYABLE:
                 break
 
-        if circuit_enabled and result is not None:
-            circuit_record(cfg, result.outcome, is_probe=is_probe)
+        if result is not None:
+            if use_futility:
+                from ._sensor import CallContext
+                snap    = getattr(result, "queue_snapshot", None)
+                running = (
+                    sum(1 for r in snap if r.get("status") == "running")
+                    if snap else 0
+                )
+                ctx = CallContext(
+                    elapsed_s=result.total_s,
+                    time_remaining=(
+                        None if cfg.deadline_s is None
+                        else max(0.0, cfg.deadline_s - result.total_s)
+                    ),
+                    last_outcome=result.outcome,
+                    running_jobs=running,
+                )
+                futility_update(cfg, sensor, result.outcome, ctx, is_probe)
+            elif use_count:
+                circuit_record(cfg, result.outcome, is_probe=is_probe)
 
         write_log(cfg, operation, result, context)
         return result

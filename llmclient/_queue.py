@@ -26,6 +26,7 @@ and per-model (key 'last_release_at:<model>') so stall detection for
 one model is not masked by completions from another.
 """
 import logging
+import math
 import os
 import sqlite3
 import time
@@ -86,6 +87,16 @@ def _open() -> sqlite3.Connection:
         )
     except Exception:
         pass
+    # Migrate circuit_state for futility-mode columns (added v0.7.0).
+    # Fresh DBs also pick these up here, so the CREATE literal stays minimal.
+    for _col in (
+        "ALTER TABLE circuit_state ADD COLUMN llr REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE circuit_state ADD COLUMN llr_updated_at REAL",
+    ):
+        try:
+            conn.execute(_col)
+        except Exception:
+            pass
     return conn
 
 
@@ -227,6 +238,8 @@ def _read_queue_state() -> list[dict]:
 def acquire(
     cfg,
     abort_event: threading.Event | None,
+    *,
+    grace_s: float = 0.0,
 ) -> tuple[int | None, float, str, list[dict] | None]:
     """Insert a queue row and wait until promoted.
 
@@ -234,6 +247,11 @@ def acquire(
     reason is "ok", "aborted", "queue_timeout", or "queue_stalled".
     queue_id is None when reason != "ok".
     queue_snapshot is populated on "queue_timeout" and "queue_stalled".
+
+    grace_s: minimum wait before a stall ("queue not advancing") bail may
+    fire.  Used by futility mode so a momentary lull right after submission
+    can't trigger an early bail.  The hard queue_timeout ceiling is
+    unaffected by grace.
     """
     from ._keys import get_parallel_slots
 
@@ -286,7 +304,8 @@ def acquire(
                             caller, model,
                         )
                         no_history_logged = True
-                elif (time.time() - last_rel) > stall_t:
+                elif (time.time() - last_rel) > stall_t \
+                        and (time.monotonic() - t0) >= grace_s:
                     snapshot = _read_queue_state()
                     _delete_row(row_id)
                     return None, time.monotonic() - t0, "queue_stalled", snapshot
@@ -548,3 +567,226 @@ def circuit_record(cfg, outcome: str, is_probe: bool) -> None:
 def _circuit_key(cfg) -> str:
     """Return caller-compatible circuit scope unless explicitly overridden."""
     return (getattr(cfg, "circuit_key", "") or cfg.log_caller or "").strip()
+
+
+# ---------------------------------------------------------------------------
+# Futility circuit breaker (circuit_mode == "futility")
+#
+# Replaces the consecutive-failure counter with a leaky log-likelihood-ratio
+# accumulator (Wald SPRT + forgetting factor).  Evidence weights and the
+# self-heal time constant come from a provider-specific FutilitySensor.
+# See docs/futility-circuit-breaker.md.
+# ---------------------------------------------------------------------------
+
+def _pid_alive(pid) -> bool:
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except Exception:
+        return True
+
+
+def futility_check(cfg, sensor) -> str:
+    """Return "proceed", "open", or "probe" for futility mode.
+
+    "proceed" — circuit closed (or a cheap probe just re-closed it).
+    "open"    — circuit open, skip the call.
+    "probe"   — half-open with no cheap probe available; this process makes
+                the real probe call.
+
+    When cfg.ps_probe is set and the sensor offers a probe (e.g. Ollama's
+    /api/ps), the half-open check is resolved with that cheap probe instead
+    of stealing a real slot.  The network probe runs OUTSIDE the DB
+    transaction so the shared queue lock is never held across I/O.
+
+    Fails open ("proceed") on any DB error.  No-ops when circuit_mode is
+    not "futility" or log_caller is empty.
+    """
+    caller = cfg.log_caller
+    if not caller or getattr(cfg, "circuit_mode", "count") != "futility":
+        return "proceed"
+
+    now      = time.time()
+    cooldown = cfg.circuit_cooldown_s
+
+    conn = _open()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT tripped_at, probe_pid FROM circuit_state WHERE caller=?",
+            [caller],
+        ).fetchone()
+
+        if row is None:
+            conn.execute(
+                "INSERT INTO circuit_state (caller, consecutive_n, llr, "
+                "llr_updated_at) VALUES (?, 0, 0.0, ?)",
+                [caller, now],
+            )
+            conn.execute("COMMIT")
+            return "proceed"
+
+        tripped_at, probe_pid = row
+
+        if tripped_at is None:
+            conn.execute("COMMIT")
+            return "proceed"
+
+        # Another process is already probing?
+        if probe_pid is not None:
+            if _pid_alive(probe_pid):
+                conn.execute("COMMIT")
+                return "open"
+            # Crashed probe — clear it and continue.
+            conn.execute(
+                "UPDATE circuit_state SET probe_pid=NULL WHERE caller=?",
+                [caller],
+            )
+
+        if (now - tripped_at) < cooldown:
+            conn.execute("COMMIT")
+            return "open"
+
+        # Half-open: claim the probe slot so no one else probes concurrently.
+        conn.execute(
+            "UPDATE circuit_state SET probe_pid=? WHERE caller=?",
+            [os.getpid(), caller],
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        return "proceed"
+    finally:
+        conn.close()
+
+    # We hold the probe slot.  If a cheap probe exists, use it now (outside
+    # any transaction) and apply the result.  Otherwise let the caller make
+    # the real probe call.
+    if getattr(cfg, "ps_probe", False):
+        try:
+            pr = sensor.probe()
+        except Exception:
+            pr = None
+        if pr is not None:
+            conn = _open()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                if pr.healthy:
+                    conn.execute(
+                        "UPDATE circuit_state SET llr=0.0, llr_updated_at=?, "
+                        "tripped_at=NULL, probe_pid=NULL WHERE caller=?",
+                        [now, caller],
+                    )
+                    conn.execute("COMMIT")
+                    return "proceed"
+                conn.execute(
+                    "UPDATE circuit_state SET tripped_at=?, probe_pid=NULL "
+                    "WHERE caller=?",
+                    [now, caller],
+                )
+                conn.execute("COMMIT")
+                return "open"
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+            finally:
+                conn.close()
+
+    return "probe"
+
+
+def futility_update(cfg, sensor, outcome: str, ctx, is_probe: bool) -> None:
+    """Fold one observed outcome into the leaky-LLR accumulator and update
+    the trip state.
+
+    S ← clamp( max(0, lambda*S + w(outcome)) ),  lambda = exp(-dt / tau_heal).
+
+    success  → S forced to 0, circuit closed.
+    permanent (auth / bad request) → S forced to the boundary (trip now).
+    A probe call that fails re-arms the cooldown; one that recovers closes.
+    """
+    caller = cfg.log_caller
+    if not caller or getattr(cfg, "circuit_mode", "count") != "futility":
+        return
+
+    try:
+        w = sensor.weight(outcome, ctx)
+    except Exception:
+        w = 0.0
+    permanent = bool(getattr(sensor, "is_permanent", lambda o: False)(outcome))
+    tau       = float(getattr(sensor, "tau_heal_s", 20.0))
+    boundary  = float(getattr(sensor, "trip_boundary", 4.0))
+    now       = time.time()
+
+    conn = _open()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT llr, llr_updated_at, tripped_at FROM circuit_state "
+            "WHERE caller=?",
+            [caller],
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO circuit_state (caller, consecutive_n, llr, "
+                "llr_updated_at) VALUES (?, 0, 0.0, ?)",
+                [caller, now],
+            )
+            llr, llr_updated_at, tripped_at = 0.0, now, None
+        else:
+            llr, llr_updated_at, tripped_at = row
+            llr = float(llr or 0.0)
+
+        # Leak toward the prior since the last observation.
+        if tau > 0 and llr_updated_at is not None:
+            dt = max(0.0, now - float(llr_updated_at))
+            llr *= math.exp(-dt / tau)
+
+        if outcome == "success":
+            llr = 0.0
+        elif permanent:
+            llr = boundary
+        else:
+            llr = max(0.0, llr + w)
+            llr = min(llr, boundary * 2.0)
+
+        # Derive trip state from the accumulator.
+        if outcome == "success":
+            new_tripped = None
+        elif llr >= boundary:
+            # Trip, or re-arm the cooldown after a failed probe.
+            new_tripped = now if (tripped_at is None or is_probe) else tripped_at
+        else:
+            # Below boundary: a recovering probe closes; otherwise unchanged.
+            new_tripped = None if is_probe else tripped_at
+
+        clear_probe = is_probe or (new_tripped is None)
+        if clear_probe:
+            conn.execute(
+                "UPDATE circuit_state SET llr=?, llr_updated_at=?, "
+                "tripped_at=?, probe_pid=NULL WHERE caller=?",
+                [llr, now, new_tripped, caller],
+            )
+        else:
+            conn.execute(
+                "UPDATE circuit_state SET llr=?, llr_updated_at=?, "
+                "tripped_at=? WHERE caller=?",
+                [llr, now, new_tripped, caller],
+            )
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+    finally:
+        conn.close()
