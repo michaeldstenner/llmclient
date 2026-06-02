@@ -15,6 +15,7 @@ def main() -> None:
 
     sub.add_parser("status", help="Ollama state, connections, queue")
     sub.add_parser("queue",  help="llmclient queue state only")
+    sub.add_parser("reset",  help="Reset all tripped circuit breakers")
 
     p_log = sub.add_parser("log", help="Show recent LLM call log entries")
     _lvl = p_log.add_mutually_exclusive_group()
@@ -87,6 +88,9 @@ def main() -> None:
     elif args.cmd == "log":
         from ._log import cmd_log
         cmd_log(args)
+    elif args.cmd == "reset":
+        from ._status import cmd_reset
+        cmd_reset(args)
     else:
         parser.print_help()
         sys.exit(1)

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.1] — 2026-06-02
+
+### Added
+
+- **`llmc reset` command.**  Clears all tripped circuit breakers in
+  `queue.db`, printing each caller name and the consecutive-failure
+  count that was reset.  Respects the `--dir` flag so it works
+  against any app's data directory.
+
 ## [0.6.0] — 2026-05-31
 
 ### Changed

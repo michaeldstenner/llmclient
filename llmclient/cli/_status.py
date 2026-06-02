@@ -310,6 +310,34 @@ def cmd_status(args) -> None:
     cmd_queue(args, rows=rows)
 
 
+def cmd_reset(args) -> None:
+    from .._config import get_db_path
+    db = get_db_path()
+    if not db.exists():
+        print("queue.db not found — nothing to reset")
+        return
+    conn = sqlite3.connect(str(db))
+    try:
+        rows = conn.execute(
+            "SELECT caller, consecutive_n FROM circuit_state"
+            " WHERE tripped_at IS NOT NULL"
+        ).fetchall()
+        if not rows:
+            print("No tripped circuits.")
+            conn.close()
+            return
+        conn.execute(
+            "UPDATE circuit_state"
+            " SET consecutive_n=0, tripped_at=NULL, probe_pid=NULL"
+            " WHERE tripped_at IS NOT NULL"
+        )
+        conn.commit()
+        for caller, n in rows:
+            print(f"  reset  {caller}  (consecutive_n was {n})")
+    finally:
+        conn.close()
+
+
 def cmd_queue(args, rows: list[dict] | None = None) -> None:
     if rows is None:
         rows = _queue_rows()
