@@ -165,6 +165,33 @@ def test_call_uses_queue_for_ollama_cooperative(queue_db, monkeypatch):
     assert result.queue_wait_s >= 0.0
 
 
+def test_embed_maps_queue_stall_outcome(queue_db):
+    """embed() must relabel a queue_stalled bail as timeout:queue_stall.
+
+    Regression: embed() previously collapsed every non-abort queue bail
+    into timeout:queue_wait, hiding stalls and bypassing the circuit
+    breaker (whose embed trigger is timeout:queue_stall).  It must mirror
+    call()'s mapping.
+    """
+    client = _make_client(provider="ollama", model="nomic-embed-text",
+                          queue_mode="cooperative")
+    with patch("llmclient._queue.acquire",
+               return_value=(None, 0.006, "queue_stalled", [])):
+        result = client.embed("some text")
+    assert result.outcome == "timeout:queue_stall"
+    assert result.vector is None
+
+
+def test_embed_maps_queue_wait_outcome(queue_db):
+    """A plain queue-wait bail still maps to timeout:queue_wait."""
+    client = _make_client(provider="ollama", model="nomic-embed-text",
+                          queue_mode="cooperative")
+    with patch("llmclient._queue.acquire",
+               return_value=(None, 0.5, "queue_timeout", [])):
+        result = client.embed("some text")
+    assert result.outcome == "timeout:queue_wait"
+
+
 # ---------------------------------------------------------------------------
 # Convenience constructors
 # ---------------------------------------------------------------------------

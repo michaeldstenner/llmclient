@@ -295,7 +295,8 @@ class LLMClient:
             queue_id, queue_wait_s, queue_reason, _snap = acquire(cfg, self._abort)
             if queue_id is None:
                 outcome = (
-                    "aborted" if queue_reason == "aborted"
+                    "aborted"                  if queue_reason == "aborted"
+                    else "timeout:queue_stall" if queue_reason == "queue_stalled"
                     else "timeout:queue_wait"
                 )
                 result = EmbedResult(

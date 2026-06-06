@@ -351,3 +351,56 @@ def test_acquire_waits_then_proceeds(queue_db, monkeypatch):
         t.join(timeout=2.0)
         assert results.get("row_id") is not None
         assert results["wait_s"] > 0.0
+
+
+def _seed_last_release(model: str, age_s: float) -> None:
+    """Write a last_release_at timestamp (global + per-model) age_s old."""
+    ts = str(time.time() - age_s)
+    conn = q_mod._open()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO queue_meta (key, value) "
+            "VALUES ('last_release_at', ?)", [ts])
+        conn.execute(
+            "INSERT OR REPLACE INTO queue_meta (key, value) VALUES (?, ?)",
+            [f"last_release_at:{model}", ts])
+    finally:
+        conn.close()
+
+
+def test_acquire_stale_last_release_idle_queue_still_promotes(queue_db):
+    """A stale last_release must not bail a caller that nothing blocks.
+
+    Regression: the stall check used to run before promotion and fired on
+    the first loop iteration whenever last_release was older than
+    queue_stall_timeout — deadlocking an idle queue permanently (nothing
+    could complete to refresh the timestamp).  An idle queue must promote.
+    """
+    from unittest.mock import patch
+    _seed_last_release("test-model", age_s=10_000)  # far older than stall_t
+    with patch("llmclient._keys.get_parallel_slots", return_value=4):
+        cfg = make_cfg(log_caller="test", model="test-model",
+                       priority=50, caller_max=4,
+                       queue_stall_timeout=15, queue_timeout=30)
+        row_id, _w, reason, snap = acquire(cfg, None)
+        assert reason == "ok"
+        assert row_id is not None
+        assert snap is None
+        release(row_id, "test-model")
+
+
+def test_acquire_stall_bails_when_blocked_by_running_rows(queue_db):
+    """A genuine stall still fires: slots full of non-completing work."""
+    from unittest.mock import patch
+    # Occupy the only slot with a running row owned by this (live) process,
+    # so it is never reaped and never released.
+    _insert(queue_db, pid=os.getpid(), model="test-model", status="running")
+    _seed_last_release("test-model", age_s=10_000)
+    with patch("llmclient._keys.get_parallel_slots", return_value=1):
+        cfg = make_cfg(log_caller="test", model="test-model",
+                       priority=50, caller_max=4,
+                       queue_stall_timeout=15, queue_timeout=30)
+        row_id, _w, reason, snap = acquire(cfg, None)
+        assert reason == "queue_stalled"
+        assert row_id is None
+        assert snap is not None

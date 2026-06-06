@@ -273,6 +273,13 @@ def acquire(
     queue_id is None when reason != "ok".
     queue_snapshot is populated on "queue_timeout" and "queue_stalled".
 
+    A stall bail is only considered after a promotion attempt fails, i.e.
+    while the caller is actually blocked by running rows that are not
+    releasing their slots.  An idle or under-capacity queue always promotes
+    instead, so a stale last_release alone never bails a caller — this is
+    what prevents the self-perpetuating stall deadlock after a provider
+    outage longer than queue_stall_timeout.
+
     grace_s: minimum wait before a stall ("queue not advancing") bail may
     fire.  Used by futility mode so a momentary lull right after submission
     can't trigger an early bail.  The hard queue_timeout ceiling is
@@ -317,6 +324,20 @@ def acquire(
                 _delete_row(row_id)
                 return None, time.monotonic() - t0, "queue_timeout", snapshot
 
+            # Try to grab a slot first.  Promotion succeeds whenever the
+            # queue is not actually full, so an idle queue proceeds even if
+            # its last completion is ancient.  This is what breaks the
+            # stall-detector deadlock: a stale last_release can no longer
+            # bail a caller that nothing is blocking, so a cold queue (or
+            # one recovering from a provider outage) always drains itself.
+            if _try_promote(row_id, caller, model,
+                            cfg.priority, cfg.caller_max, global_max):
+                return row_id, time.monotonic() - t0, "ok", None
+
+            # Promotion failed → running rows are holding all the slots.
+            # Only now does a stale last_release indicate a genuine stall
+            # (slots occupied by work that never completes), as opposed to
+            # an idle queue we could simply have joined.
             if stall_t is not None:
                 last_rel = _read_last_release(model)
                 if last_rel is None:
@@ -334,10 +355,6 @@ def acquire(
                     snapshot = _read_queue_state()
                     _delete_row(row_id)
                     return None, time.monotonic() - t0, "queue_stalled", snapshot
-
-            if _try_promote(row_id, caller, model,
-                            cfg.priority, cfg.caller_max, global_max):
-                return row_id, time.monotonic() - t0, "ok", None
 
             time.sleep(_POLL_S)
     except Exception:
