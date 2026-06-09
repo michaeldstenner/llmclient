@@ -1,4 +1,17 @@
 #!/bin/zsh
-# Invoke llmc via uv run + python -m to bypass the com.apple.provenance
+# Invoke llmc via uv run + python -m to work around the com.apple.provenance
 # .pth-skipping issue in Python 3.13 + macOS Sequoia (see scratch/pth-xattr-issue.md).
-exec uv run --project "$(cd "$(dirname "$0")/.." && pwd)" python3 -m llmclient.cli "$@"
+#
+# Because the editable-install .pth file is silently skipped, `llmclient` is
+# never actually importable from the venv on its own.  uv run does NOT fix
+# this.  The package only imported when the CWD happened to be the project
+# root (CWD is on sys.path), which is why `llmc` appeared to "only work from
+# the project dir".  We make it CWD-independent by putting the project root
+# on PYTHONPATH explicitly.
+#
+# ${0:A} resolves this script through the ~/bin symlink to its real path;
+# :h:h then strips bin/llmc to give the project root.  (Plain $0 keeps the
+# symlink path, which made the old `dirname $0/..` resolve to $HOME.)
+ROOT="${0:A:h:h}"
+exec env PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    uv run --project "$ROOT" python3 -m llmclient.cli "$@"

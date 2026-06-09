@@ -35,8 +35,26 @@ created in any terminal also receive the attribute.
 
 ## What works
 
-`uv run python3 -m <package>` — uv sets up the environment correctly,
-bypassing the `.pth` mechanism entirely, before handing off to Python.
+`uv run python3 -m <package>` does **NOT** actually fix this on its own —
+that earlier claim was wrong.  Because the editable-install `.pth` is
+skipped, `<package>` is never importable from the venv.  `uv run` from the
+project dir only worked because the **CWD is on `sys.path`** for `python -m`,
+which shadowed the missing install.  Run it from anywhere else and it fails
+with the same `ModuleNotFoundError`.
+
+The reliable fix is to put the project root on **`PYTHONPATH`** explicitly,
+independent of CWD:
+
+```sh
+exec env PYTHONPATH="$ROOT" uv run --project "$ROOT" python3 -m <package> "$@"
+```
+
+### Symlink gotcha (`$0`)
+
+If `~/bin/<cmd>` is a symlink, zsh keeps the **symlink path** in `$0`, so
+`dirname "$0"/..` resolves to `$HOME`, not the project root.  Use the zsh
+modifier `${0:A:h:h}` (`:A` resolves symlinks + makes absolute; `:h:h`
+strips `bin/<cmd>`) to compute `$ROOT` correctly.
 
 ## Fix applied (llmclient)
 
@@ -46,8 +64,9 @@ bypassing the `.pth` mechanism entirely, before handing off to Python.
 2. Added `bin/llmc` (committed, shell wrapper):
    ```sh
    #!/bin/zsh
-   exec uv run --project "$(cd "$(dirname "$0")/.." && pwd)" \
-       python3 -m llmclient.cli "$@"
+   ROOT="${0:A:h:h}"
+   exec env PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+       uv run --project "$ROOT" python3 -m llmclient.cli "$@"
    ```
 
 3. The symlink at `~/bin/llmc` should point to `bin/llmc`, not to
@@ -62,8 +81,12 @@ Any project with editable llmclient (or its own editable install) that
 exposes a `~/bin/` command should follow the same pattern:
 
 - Add `<package>/__main__.py`
-- Add a `bin/<cmd>` shell wrapper in the project using `uv run ... python3 -m <package>`
+- Add a `bin/<cmd>` shell wrapper that computes `ROOT="${0:A:h:h}"` and runs
+  `env PYTHONPATH="$ROOT" uv run --project "$ROOT" python3 -m <package>`
 - Symlink `~/bin/<cmd>` → `<project>/bin/<cmd>` (NOT → `.venv/bin/<cmd>`)
+- NOTE: if these wrappers were copied from the old llmclient pattern, they
+  share the same latent bug — they only work from inside the project dir.
+  Re-check squirrel / watchdog / bouncer wrappers.
 
 ## Open questions
 
