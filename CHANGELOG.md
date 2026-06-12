@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.9.0] — 2026-06-11
+
+Storage & configuration model — see `docs/storage-and-config-model.md`.
+This release lands the **storage decoupling** slice; config-resolution
+(last-wins + `locked`) and the endpoint-keyed queue / participant
+registry follow.
+
+### Changed
+
+- **The slot queue is now decoupled from the data home.**  `get_db_path()`
+  no longer derives from `data_dir`; it lives in the shared state home
+  `~/.local/state/llmclient/queue.db` (override with
+  `configure(queue_file=...)`).  This fixes the class of bug where an app
+  passing `configure(data_dir=...)` for its own logs *silently forked the
+  queue*, defeating cross-app slot coordination against one Ollama box.
+  Apps that set `data_dir` keep their own logs there but now
+  automatically rejoin the shared queue — no code change required for the
+  fix.
+
+### Added
+
+- **`configure(app=...)`** — name the application; sets the per-app data
+  home `~/.local/share/<app>/` for logs/history.  Plus `log_file=` and
+  `queue_file=` for explicit overrides.  `data_dir`/`config_dir` retained
+  for back-compat (now keyword-only).
+- `get_state_dir()` helper.
+
+### Migration
+
+- Keyword callers of `configure()` are unaffected.  Positional callers
+  must switch to keywords (`app` is now the first positional).
+- `llmc --dir PATH` inspects that dir's own `queue.db` (legacy / isolated
+  queues); without `--dir`, `llmc` reads the shared state queue.
+
 ## [0.8.0] — 2026-06-02
 
 ### Added

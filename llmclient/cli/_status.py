@@ -6,7 +6,9 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-_DB = Path.home() / ".local" / "share" / "llmclient" / "queue.db"
+def _db_path() -> Path:
+    from .._config import get_db_path
+    return get_db_path()
 
 
 def _ollama_ps(url: str) -> list[dict] | None:
@@ -69,10 +71,11 @@ def _direct_connections(
 
 
 def _queue_rows() -> list[dict]:
-    if not _DB.exists():
+    db = _db_path()
+    if not db.exists():
         return []
     try:
-        conn = sqlite3.connect(str(_DB))
+        conn = sqlite3.connect(str(db))
         try:
             rows = conn.execute("""
                 SELECT id, caller, status, pid, model,
@@ -350,7 +353,7 @@ def cmd_queue(args, rows: list[dict] | None = None) -> None:
         rows = _queue_rows()
     print("LLMCLIENT QUEUE")
     if not rows:
-        msg = "(queue.db not found)" if not _DB.exists() else "(empty)"
+        msg = "(queue.db not found)" if not _db_path().exists() else "(empty)"
         print(f"  {msg}")
         return
     print(

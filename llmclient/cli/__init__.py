@@ -9,7 +9,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--dir", metavar="PATH",
-        help="data directory for queue.db and log (overrides default)",
+        help="inspect a specific data dir's queue.db and log "
+             "(default: shared state queue)",
     )
     sub = parser.add_subparsers(dest="cmd", metavar="COMMAND")
 
@@ -70,8 +71,12 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.dir:
+        from pathlib import Path
         from llmclient import configure
-        configure(data_dir=args.dir)
+        # --dir inspects a specific dir's own queue.db (legacy / isolated
+        # queues); without it, the shared state queue is used.
+        configure(data_dir=args.dir,
+                  queue_file=Path(args.dir).expanduser() / "queue.db")
 
     if args.cmd == "status":
         from ._status import cmd_status

@@ -74,6 +74,8 @@ def queue_db(tmp_path, monkeypatch):
     """Redirect queue DB and log to a temp dir and speed up polling."""
     import llmclient._config as config_mod
     import llmclient._queue as q_mod
+    # Queue is decoupled from the data home — point queue_file directly.
+    monkeypatch.setattr(config_mod, "_queue_file", tmp_path / "queue.db")
     monkeypatch.setattr(config_mod, "_data_dir", tmp_path)
     monkeypatch.setattr(q_mod, "_POLL_S", 0.02)
     return tmp_path / "queue.db"
@@ -82,10 +84,10 @@ def queue_db(tmp_path, monkeypatch):
 def open_queue_db(db_path: Path) -> sqlite3.Connection:
     import llmclient._config as config_mod
     import llmclient._queue as q_mod
-    old = config_mod._data_dir
-    config_mod._data_dir = db_path.parent
+    old = config_mod._queue_file
+    config_mod._queue_file = db_path
     conn = q_mod._open()
-    config_mod._data_dir = old
+    config_mod._queue_file = old
     return conn
 
 
