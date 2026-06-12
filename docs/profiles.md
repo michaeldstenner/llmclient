@@ -1,5 +1,16 @@
 # llmclient Usage Profiles
 
+> **Legacy note (2026-06):** the example configs below use the older
+> **count-mode** breaker with hard `first_token_timeout` /
+> `generation_timeout` bounds.  That path is being **buried** in favour of
+> the **futility** breaker (`circuit_mode: "futility"` + `grace_s` /
+> `deadline_s` / `ps_probe`), which owns the call end-to-end and makes the
+> hard timeouts unnecessary — setting both is now flagged as nonsensical
+> config.  Prefer futility for new callers; see
+> [futility-circuit-breaker.md](./futility-circuit-breaker.md) (and the
+> "bouncer — why slow success beats fast failure" worked example).  These
+> count-mode examples are kept for reference until the migration completes.
+
 This document illustrates three common caller scenarios with example
 `LLMConfig` values.  **The specific numbers are illustrations, not
 directives.**  Every knob exists because callers genuinely differ: a
@@ -195,10 +206,10 @@ table when they diverge from the example values above.
 
 | Caller | Scenario | Fallback |
 |---|---|---|
-| bouncer | Fail Fast | Ask user |
+| bouncer | **Patient gate** (futility) — *not* Fail Fast | Summon the human (expensive) → wait through busy, bail fast only when frozen.  See [futility-circuit-breaker.md](./futility-circuit-breaker.md) "bouncer — why slow success beats fast failure". |
 | squirrel (search) | Fail Fast | Text search |
 | squirrel (sync) | No Rush | N/A — retries on next sync cycle |
 | watchdog | No Rush | N/A — next scheduled run |
-| pithos | No Rush | N/A — next scheduled run |
+| pithos | No Rush (futility, deadline ∞) | N/A — next scheduled run |
 
 *(Keep this table current as callers are added or reconfigured.)*

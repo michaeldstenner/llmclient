@@ -225,3 +225,62 @@ def test_from_profile_anthropic_sets_off():
         with patch("llmclient._keys.resolve_api_key", return_value=""):
             c = LLMClient.from_profile("anthropic", "claude-haiku")
     assert c._cfg.queue_mode == "off"
+
+
+def test_futility_overrides_hard_timeouts_with_deadline(queue_db):
+    """In futility mode the legacy hard timeouts are ignored; the active call
+    is bounded by deadline_s instead.  The two systems must never co-bound."""
+    from types import SimpleNamespace
+    captured = {}
+
+    def fake_dispatch(system, user, c, url, key, abort):
+        captured["cfg"] = c
+        return SimpleNamespace(
+            text="ok", outcome="success", call_s=0.1,
+            inference_s=0.1, load_s=0.0, prompt_tokens=1, response_tokens=1,
+        )
+
+    cfg = make_cfg(
+        provider="ollama", model="m", log_caller="bouncer", queue_mode="off",
+        circuit_mode="futility", deadline_s=90,
+        first_token_timeout=30, generation_timeout=30,  # must be ignored
+    )
+    client = object.__new__(LLMClient)
+    client._cfg, client._abort = cfg, None
+    client._url, client._api_key = "http://localhost:11434", ""
+
+    with patch("llmclient.providers.dispatch", fake_dispatch):
+        client.call("hi")
+
+    eff = captured["cfg"]
+    assert eff.first_token_timeout == 90   # deadline overrode the hard 30s
+    assert eff.generation_timeout == 90
+
+
+def test_futility_infinite_deadline_drops_hard_timeouts(queue_db):
+    """deadline_s=None → hard timeouts cleared (call falls back to cfg.timeout)."""
+    from types import SimpleNamespace
+    captured = {}
+
+    def fake_dispatch(system, user, c, url, key, abort):
+        captured["cfg"] = c
+        return SimpleNamespace(
+            text="ok", outcome="success", call_s=0.1,
+            inference_s=0.1, load_s=0.0, prompt_tokens=1, response_tokens=1,
+        )
+
+    cfg = make_cfg(
+        provider="ollama", model="m", log_caller="pithos-adcut",
+        queue_mode="off", circuit_mode="futility", deadline_s=None,
+        first_token_timeout=180, generation_timeout=600,
+    )
+    client = object.__new__(LLMClient)
+    client._cfg, client._abort = cfg, None
+    client._url, client._api_key = "http://localhost:11434", ""
+
+    with patch("llmclient.providers.dispatch", fake_dispatch):
+        client.call("hi")
+
+    eff = captured["cfg"]
+    assert eff.first_token_timeout is None
+    assert eff.generation_timeout is None

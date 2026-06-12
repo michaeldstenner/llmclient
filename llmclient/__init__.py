@@ -9,6 +9,10 @@ _RETRYABLE = {
     "timeout", "timeout:model_loaded_but_slow", "timeout:model_not_loaded",
 }
 
+# Callers already warned about the futility/hard-timeout combo (dedup so the
+# nudge fires once per caller per process, not once per call).
+_FUTILITY_TIMEOUT_WARNED: set = set()
+
 
 @dataclass(frozen=True)
 class LLMConfig:
@@ -187,18 +191,44 @@ class LLMClient:
                 return result
             is_probe = (check == "probe")
 
-        # In futility mode, deadline_s caps the queue-wait phase (reusing the
-        # queue_timeout ceiling) and grace_s gates the stall ("not advancing")
-        # bail.  The active call is still bounded by first_token/generation
-        # timeouts.
+        # In futility mode the breaker's grace_s + deadline_s own the call
+        # end-to-end: deadline_s bounds BOTH the queue wait and the active
+        # call, and the legacy hard timeouts (first_token_timeout /
+        # generation_timeout) are IGNORED.  The two systems must never bound
+        # the same call — that's the nonsensical combo we warn about and the
+        # footgun that made bouncer/pithos bail early.  See
+        # docs/futility-circuit-breaker.md.  grace_s gates the stall bail.
+        # An infinite deadline_s (None) leaves the active call bounded only by
+        # cfg.timeout as the ultimate ceiling.
         acquire_cfg   = cfg
         acquire_grace = 0.0
         if use_futility:
             acquire_grace = cfg.grace_s or 0.0
+            if (cfg.first_token_timeout is not None
+                    or cfg.generation_timeout is not None):
+                if cfg.log_caller not in _FUTILITY_TIMEOUT_WARNED:
+                    _FUTILITY_TIMEOUT_WARNED.add(cfg.log_caller)
+                    import logging
+                    logging.getLogger("llmclient").warning(
+                        "caller %r: first_token_timeout/generation_timeout "
+                        "are ignored under circuit_mode='futility' — "
+                        "deadline_s governs.  Remove them from the config.",
+                        cfg.log_caller or "?",
+                    )
+            overrides = {"first_token_timeout": None,
+                         "generation_timeout": None}
             if cfg.deadline_s is not None:
-                qt = (cfg.deadline_s if cfg.queue_timeout is None
-                      else min(cfg.queue_timeout, cfg.deadline_s))
-                acquire_cfg = _dc_replace(cfg, queue_timeout=qt)
+                dl = int(cfg.deadline_s)
+                overrides["queue_timeout"] = (
+                    dl if cfg.queue_timeout is None
+                    else min(cfg.queue_timeout, dl))
+                # Deadline bounds the active call.  v1 applies the full
+                # deadline as each phase's budget; see scratch notes for the
+                # per-attempt-remaining / single-absolute-deadline refinement.
+                overrides["first_token_timeout"] = dl
+                overrides["generation_timeout"]  = dl
+            cfg         = _dc_replace(cfg, **overrides)
+            acquire_cfg = cfg
 
         result = None
         for attempt in range(attempts):

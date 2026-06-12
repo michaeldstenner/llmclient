@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.9.2] — 2026-06-11
+
+Futility cleanup — the breaker now owns the call end-to-end, and the
+legacy count-mode/hard-timeout path is being buried (not deleted). See
+`docs/futility-circuit-breaker.md` and `scratch/futility-cleanup-followups.md`.
+
+### Changed
+
+- **Futility mode owns the call.** Under `circuit_mode="futility"`,
+  `deadline_s` now bounds **both** the queue wait and the active call, and
+  the legacy `first_token_timeout` / `generation_timeout` are **ignored**.
+  The two systems no longer co-bound a call — which fixes the footgun where
+  a futility caller (bouncer, pithos) still hard-bailed at its old
+  first-token timeout instead of waiting toward its deadline. An infinite
+  `deadline_s` (None) leaves the active call bounded only by `cfg.timeout`.
+- Setting `first_token_timeout` / `generation_timeout` together with
+  `circuit_mode="futility"` now logs a one-time **warning** (the values are
+  ignored). This will become a hard error once consumers drop them.
+
+### Docs
+
+- `futility-circuit-breaker.md`: added the **bouncer** worked example
+  (the slow-success-beats-fast-failure preference order).
+- `profiles.md`: legacy banner — count-mode examples are deprecated in
+  favour of futility.
+
 ## [0.9.1] — 2026-06-11
 
 Additive instrumentation for the storage model (no breaking changes).

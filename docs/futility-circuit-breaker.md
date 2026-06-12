@@ -139,6 +139,54 @@ backwards; a **deadline-relative** futility definition flips them
 automatically. That is the test the two-knob basis had to pass, and it
 passes.
 
+## Worked example: bouncer — why slow success beats fast failure
+
+bouncer is an unattended approval gate: it lets a long agentic workflow
+run *without a human babysitting it*. Its fallback is therefore not "ask
+the user" in the cheap sense — it is **summon the human**, which is
+expensive. That fixes its preference order:
+
+```
+1. bouncer runs quickly
+2. bouncer runs slowly      ← a slow SUCCESS
+3. bouncer fails quickly    ← summons the human
+4. bouncer fails slowly     ← summons the human AND wasted the wait
+```
+
+The load-bearing inversion is **2 over 3: a slow success beats a fast
+failure.** Nobody cares if the workflow takes 25 minutes instead of 20
+because some gate calls were slow. What's unacceptable is being dragged
+back to approve something every couple of minutes — and the *worst* case
+(4) is being dragged back *and* having watched bouncer burn a long
+timeout first.
+
+This dictates bouncer's config exactly, and it is the canonical
+"expensive Plan B → generous deadline" row of the table above:
+
+- **No `first_token_timeout` / `generation_timeout`.** A hard first-token
+  bail produces outcome #3 (fast failure → babysitting) precisely when #2
+  (wait for the slow success) is wanted. These are vestigial knobs from
+  the pre-futility ("count") system; in futility mode they must be absent
+  (the breaker ignores them — see "Old config" cleanup below / the
+  storage-and-config notes).
+- **Generous `deadline_s`** (minutes, not seconds). Bail reluctantly. The
+  deadline is a backstop against *unmodeled* hangs (priority inversion, a
+  hung socket), not a latency target.
+- **`ps_probe=True` is what makes #3 beat #4.** The only time a *fast*
+  failure is correct is when Ollama is genuinely frozen — and then you'd
+  be babysitting anyway, so failing fast (3) beats failing slow (4). The
+  `/api/ps` probe separates frozen from busy cheaply, so bouncer waits
+  through *busy* (→ slow success) and bails fast only on *frozen*.
+- **`caller_max=4`, not 1.** The workflow fires several gate calls; they
+  should run concurrently so bouncer "runs quickly" (#1) when the GPU is
+  free. bouncer is the *priority* work — it should be able to use all
+  slots; background callers yield to it, not the reverse. (Whether
+  background must always leave bouncer headroom is the separate
+  interactive-headroom question.)
+
+So despite the old "Fail Fast" label in `profiles.md`, bouncer is a
+**patient gate**: wait through busy, fail fast only when truly frozen.
+
 ## Architecture: shared likelihood, per-caller times
 
 Signal-detection theory factors this cleanly, and the factorization is the
