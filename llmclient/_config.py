@@ -121,6 +121,10 @@ def get_log_level() -> str:
     return _log_level
 
 
+def get_app() -> str | None:
+    return _app
+
+
 def get_config_files() -> list[Path]:
     """Return config file paths in descending priority order."""
     paths: list[Path] = []

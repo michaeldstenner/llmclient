@@ -296,6 +296,20 @@ def cmd_status(args) -> None:
         if num_parallel is not None else ""
     )
     print(f"OLLAMA  {url}{par_str}")
+
+    # Slot budget (llmclient global_max) vs physical NUM_PARALLEL.  A budget
+    # below physical is intentional headroom (silent); a budget *above* it
+    # means llmclient will oversubscribe the GPU — the only case worth a flag.
+    from .._keys import get_parallel_slots
+    budget = get_parallel_slots()
+    if num_parallel is not None:
+        if budget > num_parallel:
+            print(f"  ⚠ slot budget {budget} > NUM_PARALLEL {num_parallel}"
+                  f" — llmclient may oversubscribe the GPU")
+        elif budget < num_parallel:
+            print(f"  slot budget {budget}/{num_parallel}"
+                  f" ({num_parallel - budget} held back)")
+
     models = _ollama_ps(url)
     if models is None:
         print("  unreachable")
@@ -311,6 +325,24 @@ def cmd_status(args) -> None:
     # ── QUEUE ─────────────────────────────────────────────────────────
     print()
     cmd_queue(args, rows=rows)
+
+    # ── PARTICIPANTS ──────────────────────────────────────────────────
+    # Everyone who has used this shared queue (incl. idle callers holding
+    # no row) — makes an accidental separate-queue fork immediately visible
+    # and points at each app's log.
+    from .._queue import read_participants
+    parts = read_participants()
+    print("\nPARTICIPANTS (shared queue)")
+    if not parts:
+        print("  (none registered yet)")
+    else:
+        for p in parts:
+            age = f"{int(p['age_s'])}s ago" if p["age_s"] is not None else "?"
+            app = p["app"] or "?"
+            print(f"  {p['caller']:<16} app:{app:<10}"
+                  f" {(p['model'] or ''):<24} seen {age}")
+            if p["log_file"]:
+                print(f"    log: {p['log_file']}")
 
 
 def cmd_reset(args) -> None:

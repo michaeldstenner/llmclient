@@ -20,6 +20,7 @@ def cmd_call(args) -> None:
     cfg    = LLMConfig(
         provider=provider, model=model,
         timeout=timeout, queue_mode=queue_mode,
+        log_caller="llmc",
     )
     client = LLMClient(cfg)
 

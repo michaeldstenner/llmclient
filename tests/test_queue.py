@@ -404,3 +404,28 @@ def test_acquire_stall_bails_when_blocked_by_running_rows(queue_db):
         assert reason == "queue_stalled"
         assert row_id is None
         assert snap is not None
+
+
+# ---------------------------------------------------------------------------
+# Participant registry
+# ---------------------------------------------------------------------------
+
+def test_participant_registry_upserts(queue_db):
+    from llmclient._queue import register_participant, read_participants
+    url = "http://localhost:11434"
+    register_participant("bouncer", url, "qwen3:32b")
+    register_participant("squirrel", url, "qwen3:32b")
+    # Re-register bouncer with a new model → upsert on (caller, url), not dup.
+    register_participant("bouncer", url, "nomic-embed-text")
+
+    roster = {r["caller"]: r for r in read_participants()}
+    assert set(roster) == {"bouncer", "squirrel"}
+    assert roster["bouncer"]["model"] == "nomic-embed-text"
+    assert roster["bouncer"]["url"] == url
+    assert roster["bouncer"]["age_s"] is not None
+
+
+def test_participant_registry_ignores_empty_caller(queue_db):
+    from llmclient._queue import register_participant, read_participants
+    register_participant("", "http://localhost:11434", "qwen3:32b")
+    assert read_participants() == []

@@ -75,6 +75,21 @@ CREATE TABLE IF NOT EXISTS queue_meta (
 )
 """
 
+# Persistent roster of who uses this shared queue, so `llmc status` can
+# enumerate every caller on an endpoint (and find their per-app logs) even
+# when they're idle and hold no queue row.  Upserted once per call.
+_CREATE_PARTICIPANTS = """
+CREATE TABLE IF NOT EXISTS participants (
+    caller    TEXT NOT NULL,
+    url       TEXT NOT NULL,
+    app       TEXT,
+    model     TEXT,
+    log_file  TEXT,
+    last_seen REAL,
+    PRIMARY KEY (caller, url)
+)
+"""
+
 
 def _migrate_circuit_key(conn) -> None:
     """Re-key circuit_state from caller (old PRIMARY KEY) to circuit_key.
@@ -125,6 +140,7 @@ def _open() -> sqlite3.Connection:
     conn.execute(_CREATE_QUEUE)
     conn.execute(_CREATE_CIRCUIT)
     conn.execute(_CREATE_META)
+    conn.execute(_CREATE_PARTICIPANTS)
     # Migrate existing DBs that predate the model column
     try:
         conn.execute(
@@ -419,6 +435,66 @@ def release(queue_id: int, model: str = "") -> None:
             conn.execute("ROLLBACK")
         except Exception:
             pass
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Participant registry
+# ---------------------------------------------------------------------------
+
+def register_participant(caller: str, url: str, model: str) -> None:
+    """Record (or refresh) one caller's presence on an endpoint.
+
+    Cheap upsert keyed on (caller, url); failures are swallowed so the
+    roster never breaks a real call.  `app` and `log_file` are pulled from
+    the live config so `llmc status` can point at each caller's log.
+    """
+    if not caller:
+        return
+    from ._config import get_app, get_log_path
+    conn = None
+    try:
+        conn = _open()
+        conn.execute(
+            "INSERT INTO participants "
+            "(caller, url, app, model, log_file, last_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(caller, url) DO UPDATE SET "
+            "  app=excluded.app, model=excluded.model, "
+            "  log_file=excluded.log_file, last_seen=excluded.last_seen",
+            [caller, url, get_app() or "", model, str(get_log_path()),
+             time.time()],
+        )
+    except Exception:
+        pass
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def read_participants() -> list[dict]:
+    """Return the roster for diagnostics, most-recently-seen first."""
+    conn = _open()
+    try:
+        rows = conn.execute(
+            "SELECT caller, url, app, model, log_file, last_seen "
+            "FROM participants ORDER BY last_seen DESC"
+        ).fetchall()
+        now = time.time()
+        return [
+            {
+                "caller":    r[0],
+                "url":       r[1],
+                "app":       r[2],
+                "model":     r[3],
+                "log_file":  r[4],
+                "age_s":     round(now - r[5], 1) if r[5] else None,
+            }
+            for r in rows
+        ]
+    except Exception:
+        return []
     finally:
         conn.close()
 

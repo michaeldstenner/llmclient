@@ -208,6 +208,8 @@ class LLMClient:
             queue_wait_s = 0.0
             queue_id     = None
             if cfg.queue_mode == "cooperative" and cfg.provider == "ollama":
+                from ._queue import register_participant
+                register_participant(cfg.log_caller, self._url, cfg.model)
                 queue_id, queue_wait_s, queue_reason, queue_snap = acquire(
                     acquire_cfg, self._abort, grace_s=acquire_grace)
                 if queue_id is None:
@@ -292,6 +294,8 @@ class LLMClient:
         queue_wait_s = 0.0
         queue_id     = None
         if cfg.queue_mode == "cooperative" and cfg.provider == "ollama":
+            from ._queue import register_participant
+            register_participant(cfg.log_caller, self._url, cfg.model)
             queue_id, queue_wait_s, queue_reason, _snap = acquire(cfg, self._abort)
             if queue_id is None:
                 outcome = (

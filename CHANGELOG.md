@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.1] — 2026-06-11
+
+Additive instrumentation for the storage model (no breaking changes).
+
+### Added
+
+- **Participant registry.**  A persistent `participants` table in the
+  shared queue records every caller on an endpoint
+  `(caller, url, app, model, log_file, last_seen)`, upserted once per
+  call.  `llmc status` now lists them under **PARTICIPANTS** — so idle
+  callers are visible and an accidental separate-queue fork shows up
+  immediately, with a pointer to each app's log.
+- **Oversubscription diagnostic.**  `llmc status` compares the slot
+  budget (`parallel_slots`) against the detected physical `NUM_PARALLEL`:
+  a budget *above* physical is flagged (llmclient may oversubscribe the
+  GPU); a budget *below* is shown as intentional headroom.
+- `llmc call` now identifies as caller `llmc` (was anonymous).
+
 ## [0.9.0] — 2026-06-11
 
 Storage & configuration model — see `docs/storage-and-config-model.md`.
