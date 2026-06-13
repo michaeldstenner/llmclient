@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.3] — 2026-06-12
+
+### Fixed
+
+- **Abandoned requests now cancel the upstream Ollama generation.** When a
+  streaming call bails (first-token timeout, generation/deadline timeout,
+  or abort), `_stream_request` now **closes the HTTP connection** so Ollama
+  sees the client disconnect and cancels the generation, freeing the slot
+  promptly. Previously the reader thread kept the connection open and the
+  generation ran to completion server-side, holding a `qwen3:32b` slot long
+  after the caller gave up — the zombie-slot spiral that starved every other
+  caller (each human approval spawning a fresh classify onto the heap). The
+  0.9.2 deadline→timeout mapping had made the orphan window worse (up to
+  ~2×deadline); this closes it. Reported by hobbes.
+
 ## [0.9.2] — 2026-06-11
 
 Futility cleanup — the breaker now owns the call end-to-end, and the

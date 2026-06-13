@@ -55,11 +55,34 @@ def _stream_request(
     """
     chunk_q: _queue_lib.Queue = _queue_lib.Queue()
     exc_holder: list = [None]
+    resp_holder: list = [None]
+    closed: list = [False]
+
+    def _cancel_upstream() -> None:
+        """Tear down the HTTP connection so Ollama sees the client disconnect
+        and CANCELS the generation, freeing the slot promptly.  Without this,
+        an abandoned / timed-out request keeps generating server-side and
+        holds a slot — the zombie-slot spiral that starves every other
+        caller.  Must be called on every bail path."""
+        if closed[0]:
+            return
+        closed[0] = True
+        resp = resp_holder[0]
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
 
     def _reader() -> None:
         try:
             urlopen_timeout = first_token_timeout + generation_timeout + 5
-            with urllib.request.urlopen(req, timeout=urlopen_timeout) as resp:
+            resp = urllib.request.urlopen(req, timeout=urlopen_timeout)
+            resp_holder[0] = resp
+            if closed[0]:          # bailed during connect — abort immediately
+                resp.close()
+                return
+            try:
                 for raw in resp:
                     stripped = raw.strip()
                     if not stripped:
@@ -68,6 +91,11 @@ def _stream_request(
                         chunk_q.put(json.loads(stripped))
                     except json.JSONDecodeError:
                         pass
+            finally:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
         except Exception as exc:
             exc_holder[0] = exc
         finally:
@@ -78,6 +106,7 @@ def _stream_request(
     try:
         first = chunk_q.get(timeout=first_token_timeout)
     except _queue_lib.Empty:
+        _cancel_upstream()
         return {"chunks": [], "error": None, "timeout_phase": "first_token"}
 
     if first is None:
@@ -91,16 +120,19 @@ def _stream_request(
 
     while True:
         if abort_event is not None and abort_event.is_set():
+            _cancel_upstream()
             return {"chunks": chunks, "error": None, "timeout_phase": "aborted"}
 
         remaining = gen_deadline - time.monotonic()
         if remaining <= 0:
+            _cancel_upstream()
             return {"chunks": chunks, "error": None, "timeout_phase": "generation"}
 
         try:
             chunk = chunk_q.get(timeout=min(remaining, _ABORT_CHECK_S))
         except _queue_lib.Empty:
             if time.monotonic() >= gen_deadline:
+                _cancel_upstream()
                 return {"chunks": chunks, "error": None, "timeout_phase": "generation"}
             continue
 

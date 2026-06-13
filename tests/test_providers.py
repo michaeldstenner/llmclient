@@ -395,3 +395,64 @@ def test_extract_text_fallback_to_choice_text():
 def test_extract_text_missing_choices_raises():
     with pytest.raises(ValueError, match="missing choices"):
         _extract_text({"choices": []})
+
+
+def test_stream_request_cancels_upstream_on_first_token_timeout():
+    """On bail, the HTTP connection must be closed so Ollama cancels the
+    generation and frees the slot (no zombie)."""
+    from llmclient.providers.ollama import _stream_request
+
+    released = threading.Event()
+    state = {"close_called": False}
+
+    class FakeResp:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            # Block as if generating — never yield a first token.
+            released.wait(timeout=5)
+            raise StopIteration
+
+        def close(self):
+            state["close_called"] = True
+            released.set()
+
+    with patch("urllib.request.urlopen", lambda req, timeout=None: FakeResp()):
+        result = _stream_request(MagicMock(), 0.15, 1.0, None)
+
+    assert result["timeout_phase"] == "first_token"
+    assert state["close_called"] is True   # upstream was cancelled on bail
+
+
+def test_stream_request_cancels_upstream_on_abort():
+    from llmclient.providers.ollama import _stream_request
+
+    released = threading.Event()
+    state = {"close_called": False}
+    abort = threading.Event()
+
+    class FakeResp:
+        def __init__(self):
+            self._first = True
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if self._first:
+                self._first = False
+                abort.set()   # trip the abort right after the first token
+                return b'{"response": "hi", "done": false}\n'
+            released.wait(timeout=5)
+            raise StopIteration
+
+        def close(self):
+            state["close_called"] = True
+            released.set()
+
+    with patch("urllib.request.urlopen", lambda req, timeout=None: FakeResp()):
+        result = _stream_request(MagicMock(), 1.0, 5.0, abort)
+
+    assert result["timeout_phase"] == "aborted"
+    assert state["close_called"] is True
