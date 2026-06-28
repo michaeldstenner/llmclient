@@ -1,6 +1,7 @@
 import json
 import math
 import queue as _queue_lib
+import re
 import socket
 import threading
 import time
@@ -10,6 +11,28 @@ import urllib.error
 from . import _ProviderResult, _EmbedProviderResult
 
 _ABORT_CHECK_S = 1.0   # patched to a small value in tests
+
+# Persisted high-water mark for num_ctx per (base_url, model).
+# Prevents the ratchet from relaxing when /api/ps is momentarily
+# empty (embed eviction, cancel gap, HTTP error, race window).
+_ctx_hwm: dict[tuple[str, str], tuple[int, float]] = {}
+_ctx_hwm_lock = threading.Lock()
+
+
+def _parse_keep_alive_s(keep_alive: str | int | float) -> float:
+    """Parse an Ollama keep_alive value to seconds."""
+    if isinstance(keep_alive, (int, float)):
+        return float(keep_alive)
+    s = str(keep_alive).strip().lower()
+    m = re.fullmatch(r"(-?\d+(?:\.\d+)?)\s*(h|m|s|ms|us|ns)?", s)
+    if not m:
+        return 300.0
+    val, unit = float(m.group(1)), (m.group(2) or "s")
+    if val < 0:
+        return float("inf")
+    mult = {"ns": 1e-9, "us": 1e-6, "ms": 1e-3,
+            "s": 1, "m": 60, "h": 3600}
+    return val * mult.get(unit, 1)
 
 
 def _check_ollama_busy(base_url: str, model: str) -> bool:
@@ -195,12 +218,27 @@ def call_ollama(
         options["num_ctx"] = cfg.extra_params["num_ctx"]
 
     # Upward-only ratchet: never request a smaller context than what's
-    # already loaded — a smaller request forces Ollama to reload the
-    # model, blocking behind any in-progress inference at the larger size.
+    # already loaded.  Persists the high-water mark in-process so a
+    # momentary /api/ps gap doesn't collapse it.  Relaxes only after
+    # keep_alive has plausibly expired.
     if "num_ctx" in options:
+        hwm_key = (base_url, model)
+        now = time.monotonic()
+        ka_s = _parse_keep_alive_s(keep_alive)
+
         loaded_ctx = _get_loaded_ctx(base_url, model)
-        if loaded_ctx is not None:
-            options["num_ctx"] = max(options["num_ctx"], loaded_ctx)
+
+        with _ctx_hwm_lock:
+            prev_ctx, prev_ts = _ctx_hwm.get(hwm_key, (0, 0.0))
+            expired = (now - prev_ts) > ka_s if prev_ts else True
+
+            if expired:
+                floor = loaded_ctx or 0
+            else:
+                floor = max(prev_ctx, loaded_ctx or 0)
+
+            options["num_ctx"] = max(options["num_ctx"], floor)
+            _ctx_hwm[hwm_key] = (options["num_ctx"], now)
 
     think = cfg.extra_params.get("think", False)
 
