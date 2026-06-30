@@ -95,6 +95,69 @@ denied), then **retry the exact command prefixed** with
 `# ESCALATE: <reason>`. The `Read` tool is not subject to this hook —
 prefer it for single files (configs, plists).
 
+### 7. `OLLAMA_NUM_PARALLEL` is auto-selected and silently drifts
+
+The Homebrew plist does **not** pin `OLLAMA_NUM_PARALLEL`. Ollama
+auto-selects it at server start (memory/context driven). It has flipped
+on its own across restarts: `1` → `4` (2026-04-26) → `1` again
+(2026-06-11), same `0.24.0` binary. **A drift to 1 while llmclient still
+admits 4 (`parallel_slots`, default 4) is the modern repeat of the §4
+contention bug** — the queue releases 4 callers, Ollama serializes 1, the
+other 3 starve and time out with `queue_wait_s≈0` + `call_s` pinned at
+their cap (admitted-then-starved; see §2). Larger context pushes the auto
+pick toward 1 (4×32k KV won't fit), so growing `num_ctx` (e.g. pithos's
+66k-char prompts) can trigger the drop.
+
+**Keep `parallel_slots` == the live `NUM_PARALLEL`.** To pin Ollama:
+- `brew services restart ollama` **regenerates the plist** and Homebrew 4
+  loads the formula from its JSON API cache — so editing the plist *or*
+  the formula `.rb` does **not** survive a `brew services` cycle. That is
+  exactly how a live-set value gets lost.
+- Durable pin: set it in the plist and reload via **launchctl**, not brew:
+  ```
+  /usr/libexec/PlistBuddy -c \
+    "Add :EnvironmentVariables:OLLAMA_NUM_PARALLEL string 4" \
+    ~/Library/LaunchAgents/homebrew.mxcl.ollama.plist
+  launchctl bootout  gui/$(id -u)/homebrew.mxcl.ollama
+  launchctl bootstrap gui/$(id -u) \
+    ~/Library/LaunchAgents/homebrew.mxcl.ollama.plist
+  ```
+  Confirm with the `server config` line (Gotcha shows `OLLAMA_NUM_PARALLEL:4`).
+  **Anyone who later runs `brew services restart ollama` reverts it to the
+  auto pick — reapply via launchctl.**
+
+### 8. Editable installs are "ghosts": running but can't cold-start
+
+Consumers (pithos, etc.) run as launchd daemons via
+`uv run --project … python -m <app>.main serve`. Their venv editable
+installs of the app **and** llmclient rely on `.pth` files that get
+**skipped** — `_editable_impl_<app>.pth` carries a `com.apple.provenance`
+xattr, and uv leaves duplicate scars (`… 2.pth`, `… 3.pth`). When skipped,
+`lib/` never lands on `sys.path` and `import <app>` fails in a *fresh*
+process. **The live daemon keeps working only because it imported when the
+`.pth` was still good** — so it survives in memory but **any restart,
+launchd KeepAlive after a crash, or reboot fails to come back up.**
+
+Detect: run the exact launchd command by hand —
+`uv run --project <path> python -c "import <app>.serve, llmclient"`. If it
+`ModuleNotFoundError`s, the daemon is a ghost. **Never restart a consumer
+daemon without first confirming a clean cold import**, or you brick it.
+Fix: `uv sync --reinstall` in the project, strip the xattr
+(`xattr -d com.apple.provenance <…>.pth`), re-test the cold import, *then*
+restart (`launchctl kickstart -k gui/$(id -u)/<label>`).
+
+### 9. The slot queue moved; killed consumers leave orphan slots
+
+As of v0.9.0 the shared slot queue is **decoupled from the data home**:
+it lives at **`~/.local/state/llmclient/queue.db`** (note `state`, not
+`share`). Per-app `~/.local/share/<app>/` now holds only logs. So the old
+`~/.local/share/llmclient/queue.db` is stale (frozen mtime) — editing it
+does nothing; `llmc status` reads the `state` one. A consumer **killed**
+mid-call cannot release its slot, and the queue does **not** auto-reap a
+dead holder, so `llmc status` shows a phantom `running` slot on a dead pid
+indefinitely. Clear it: confirm the pid is dead (`ps -p <pid>`), then
+`DELETE FROM queue WHERE pid=<pid>` in the `state` db.
+
 ---
 
 ## Runbook (do it in this order)
