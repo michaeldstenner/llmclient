@@ -12,6 +12,7 @@ authors = [{name = "Michael Stenner", email = "mstenner@gmail.com"}]
 
 [project.scripts]
 llmc = "llmclient.cli:main"
+aip_models = "llmclient.cli._aip_models:main"
 
 [project.urls]
 Homepage = "https://github.com/michaeldstenner/llmclient"

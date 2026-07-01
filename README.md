@@ -62,10 +62,32 @@ LLMClient.openai_compatible(model, *, abort_event=None, **cfg_kwargs)
 LLMClient.claude_code(model="", *, abort_event=None, **cfg_kwargs)
 LLMClient.from_profile(provider, model, *, abort_event=None, **cfg_kwargs)
 LLMClient.from_dict(d, *, abort_event=None)
+FallbackLLMClient(configs, *, abort_event=None, fallback_on=None)
 ```
 
 `from_profile` and `from_dict` set `queue_mode="cooperative"`
 automatically for Ollama and `queue_mode="off"` for cloud providers.
+
+`FallbackLLMClient` wraps multiple `LLMConfig`s and tries them in order.
+By default it falls back on availability-style failures such as timeouts,
+`error:unreachable`, `http_500`, `http_502`, `http_503`, `http_504`, and
+open circuit outcomes.  Override `fallback_on` with exact outcomes or
+prefix patterns ending in `*`.
+
+```python
+from llmclient import FallbackLLMClient, LLMConfig
+
+client = FallbackLLMClient(
+    [
+        LLMConfig(provider="openai_compatible", model="gemma-4", url=aip_url),
+        LLMConfig(provider="openai_compatible", model="gpt-oss-120b", url=aip_url),
+        LLMConfig(provider="openai_compatible", model="nemotron-3-ultra", url=aip_url),
+    ],
+    fallback_on=("timeout*", "error:unreachable", "http_5*"),
+)
+result = client.call("What is 2 + 2?")
+print([a.cfg.model for a in client.last_attempts])
+```
 
 `from_dict` accepts a flat dict (e.g. a YAML config stanza). `provider`
 is optional and inferred from `url` if absent (port 11434 or "ollama" in

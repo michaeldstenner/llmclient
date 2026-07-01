@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field, replace as _dc_replace
+from collections.abc import Iterable
 import threading
 
 from ._config import configure
@@ -93,6 +94,38 @@ class EmbedResult:
     @property
     def is_success(self) -> bool:
         return self.outcome == "success"
+
+
+@dataclass(frozen=True)
+class FallbackAttempt:
+    cfg:    LLMConfig
+    result: LLMResult | EmbedResult
+
+
+DEFAULT_FALLBACK_OUTCOMES = (
+    "timeout",
+    "timeout:first_token",
+    "timeout:generation",
+    "timeout:queue_wait",
+    "timeout:queue_stall",
+    "error:unreachable",
+    "http_500",
+    "http_502",
+    "http_503",
+    "http_504",
+    "circuit_open",
+    "circuit_futile",
+)
+
+
+def _outcome_matches(outcome: str, patterns: Iterable[str]) -> bool:
+    for pattern in patterns:
+        if pattern.endswith("*"):
+            if outcome.startswith(pattern[:-1]):
+                return True
+        elif outcome == pattern:
+            return True
+    return False
 
 
 def _infer_provider(url: str) -> str:
@@ -468,3 +501,87 @@ class LLMClient:
             LLMConfig(provider=provider, model=model, **d),
             abort_event=abort_event,
         )
+
+
+class FallbackLLMClient:
+    """Try multiple LLM configs in order for configured failure outcomes."""
+
+    def __init__(
+        self,
+        configs: Iterable[LLMConfig],
+        *,
+        abort_event: threading.Event | None = None,
+        fallback_on: Iterable[str] | None = None,
+    ) -> None:
+        self._configs = tuple(configs)
+        if not self._configs:
+            raise ValueError("FallbackLLMClient requires at least one config")
+        if fallback_on is None:
+            self._fallback_on = tuple(DEFAULT_FALLBACK_OUTCOMES)
+        elif isinstance(fallback_on, str):
+            self._fallback_on = (fallback_on,)
+        else:
+            self._fallback_on = tuple(fallback_on)
+        self._clients = tuple(
+            LLMClient(cfg, abort_event=abort_event) for cfg in self._configs
+        )
+        self._last_attempts: tuple[FallbackAttempt, ...] = ()
+
+    @property
+    def configs(self) -> tuple[LLMConfig, ...]:
+        return self._configs
+
+    @property
+    def fallback_on(self) -> tuple[str, ...]:
+        return self._fallback_on
+
+    @property
+    def last_attempts(self) -> tuple[FallbackAttempt, ...]:
+        return self._last_attempts
+
+    def _should_fallback(self, result: LLMResult | EmbedResult) -> bool:
+        return _outcome_matches(result.outcome, self._fallback_on)
+
+    def call(
+        self,
+        user: str,
+        system: str = "",
+        *,
+        operation: str = "call",
+        context: dict | None = None,
+        extra_params: dict | None = None,
+    ) -> LLMResult:
+        attempts: list[FallbackAttempt] = []
+        for i, client in enumerate(self._clients):
+            result = client.call(
+                user,
+                system=system,
+                operation=operation,
+                context=context,
+                extra_params=extra_params,
+            )
+            attempts.append(FallbackAttempt(client.cfg, result))
+            if result.is_success or i == len(self._clients) - 1:
+                break
+            if not self._should_fallback(result):
+                break
+        self._last_attempts = tuple(attempts)
+        return attempts[-1].result
+
+    def embed(
+        self,
+        text: str,
+        *,
+        operation: str = "embed",
+        context: dict | None = None,
+    ) -> EmbedResult:
+        attempts: list[FallbackAttempt] = []
+        for i, client in enumerate(self._clients):
+            result = client.embed(text, operation=operation, context=context)
+            attempts.append(FallbackAttempt(client.cfg, result))
+            if result.is_success or i == len(self._clients) - 1:
+                break
+            if not self._should_fallback(result):
+                break
+        self._last_attempts = tuple(attempts)
+        return attempts[-1].result
