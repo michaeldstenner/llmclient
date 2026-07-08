@@ -48,7 +48,9 @@ def call_openai(
     model       = cfg.model
     timeout     = int(cfg.extra_params.get("timeout", cfg.timeout))
     max_tokens  = int(cfg.extra_params.get("max_tokens", 1000))
-    temperature = float(cfg.extra_params.get("temperature", 0))
+    temperature = cfg.extra_params.get("temperature", 0)
+    if isinstance(temperature, float) and temperature == 0.0:
+        temperature = 0
 
     messages: list[dict] = []
     if system:

@@ -431,6 +431,25 @@ def test_openai_omits_system_when_empty():
     assert roles == ["user"]
 
 
+def test_openai_default_temperature_is_integer_zero():
+    captured: dict = {}
+
+    def capture(req, timeout=None):
+        captured.update(json.loads(req.data))
+        return MagicMock(
+            read=lambda: json.dumps(OPENAI_SUCCESS_BODY).encode(),
+            __enter__=lambda s: s,
+            __exit__=MagicMock(return_value=False),
+        )
+
+    cfg = _openai_cfg()
+    with patch("urllib.request.urlopen", side_effect=capture):
+        call_openai("", "user prompt", cfg, "https://api.openai.com", "k")
+
+    assert captured["temperature"] == 0
+    assert type(captured["temperature"]) is int
+
+
 def test_openai_timeout():
     cfg = _openai_cfg()
     with mock_urlopen_timeout():
