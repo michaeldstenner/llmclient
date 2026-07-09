@@ -5,6 +5,11 @@ import threading
 from ._config import configure
 
 _RETRYABLE = {
+    # first_token covers the model cold-load case (the retryable
+    # timeout:model_not_loaded before the outcome rename): the load
+    # keeps going server-side after the timed-out call, so a delayed
+    # retry lands on a warm model.
+    "timeout:first_token",
     "timeout:generation", "error:unreachable",
     # legacy names kept for any surviving callers
     "timeout", "timeout:model_loaded_but_slow", "timeout:model_not_loaded",
