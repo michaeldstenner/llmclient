@@ -99,6 +99,15 @@ def test_call_openai_compatible():
     assert result.text == "42"
 
 
+def test_call_openrouter_routes_through_openai_transport():
+    client = _make_client(provider="openrouter", url="https://openrouter.ai/api")
+    with mock_urlopen(OPENAI_BODY):
+        result = client.call("user msg")
+
+    assert result.outcome == "success"
+    assert result.text == "42"
+
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------

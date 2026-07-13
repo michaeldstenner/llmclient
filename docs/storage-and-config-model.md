@@ -144,6 +144,76 @@ A small **persistent** table in `queue_file` records
 `llmc status` can enumerate everyone using a box and point at each app's
 log. This is what makes an accidental fork *visible* immediately.
 
+## API key resolution (implemented, 2026-07-13)
+
+Ahead of the design above, `resolve_api_key()` in `_keys.py` already
+implements a concrete key-resolution chain (first non-empty wins):
+
+```
+1. explicit `api_key` on LLMConfig
+2. standard env var (ANTHROPIC_API_KEY, OPENAI_API_KEY,
+   OPENROUTER_API_KEY, ...)
+3. macOS Keychain — service "llmclient:<provider>"
+4. {config_dir}/config.yaml   (if configure(config_dir=...) was set)
+5. ~/.config/llmclient/config.yaml
+6. ~/.config/llmclient/keys.yaml   (legacy name, still read)
+```
+
+This is the current 2-level-YAML `_keys.py`, not the `locked`/last-wins
+scheme described above — that part of this doc is still aspirational.
+
+### Keychain step
+
+llmclient reads the Keychain through the `security` CLI via
+`subprocess` — there is no `keyring` dependency, so the library stays
+dependency-free. Key material is never logged or printed; a lookup
+miss (wrong account, no `security` binary, non-macOS, ACL prompt
+declined, timeout) is treated as "not found" and resolution falls
+through to the next step.
+
+### Named keys
+
+Keychain entries are looked up as `service="llmclient:<provider>"`,
+`account=<key name>`. The key name comes from, in order:
+
+```
+1. explicit key_name= arg to LLMConfig / resolve_api_key()
+2. the app name from configure(app=...)
+3. "default"
+```
+
+If the named account has no entry, resolution falls back to the
+`default` account before moving on to the config file. This lets one
+caller (e.g. an app that sets `configure(app="bouncer")`) get its own
+OpenRouter key while everyone else shares `default`, without any
+config-file changes.
+
+### Adding / rotating a key
+
+```sh
+# add or update the shared default key for a provider
+security add-generic-password -U \
+  -s "llmclient:openrouter" -a "default" -w "sk-or-..."
+
+# add a key that only one named caller should get
+security add-generic-password -U \
+  -s "llmclient:openrouter" -a "bouncer" -w "sk-or-..."
+
+# remove a named override (falls back to "default")
+security delete-generic-password -s "llmclient:openrouter" -a "bouncer"
+```
+
+### OpenRouter
+
+`openrouter` is a first-class provider: `_DEFAULT_URLS["openrouter"]`
+and `_ENV_API_KEYS["openrouter"]` (`OPENROUTER_API_KEY`) are
+pre-registered, and provider dispatch routes it through the same
+OpenAI-compatible transport used by `openai`/`openai_compatible`.  Note
+the stored default URL is `https://openrouter.ai/api` (no `/v1`) since
+the OpenAI-compatible transport appends `/v1/chat/completions` itself
+— using OpenRouter's own published base URL
+(`https://openrouter.ai/api/v1`) here would double up the path.
+
 ## Implementation note (pending)
 
 This is a **breaking change** to config resolution and storage paths, so

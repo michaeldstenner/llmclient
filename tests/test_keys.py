@@ -19,7 +19,10 @@ def reset_config(monkeypatch):
     """Isolate each test: default config state and fresh cache."""
     monkeypatch.setattr(config_mod, "_config_dir", None)
     monkeypatch.setattr(config_mod, "_data_dir", None)
+    monkeypatch.setattr(config_mod, "_app", None)
     monkeypatch.setattr(config_mod, "_log_level", "errors")
+    # Default: no real Keychain access in tests; individual tests override.
+    monkeypatch.setattr(keys_mod, "_keychain_get", lambda service, account: "")
     _clear_cache()
     yield
     _clear_cache()
@@ -117,6 +120,7 @@ def test_resolve_url_default_fallback(tmp_path, monkeypatch):
     assert resolve_url("ollama", "") == "http://localhost:11434"
     assert resolve_url("anthropic", "") == "https://api.anthropic.com"
     assert resolve_url("openai", "") == "https://api.openai.com"
+    assert resolve_url("openrouter", "") == "https://openrouter.ai/api"
 
 
 # ---------------------------------------------------------------------------
@@ -151,8 +155,97 @@ def test_resolve_api_key_env_beats_file(tmp_path, monkeypatch):
 def test_resolve_api_key_empty_when_nothing_set(tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "_DEFAULT_CONFIG_DIR", tmp_path)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(keys_mod, "_keychain_get", lambda service, account: "")
     _clear_cache()
     assert resolve_api_key("anthropic", "") == ""
+
+
+# ---------------------------------------------------------------------------
+# resolve_api_key — Keychain step
+# ---------------------------------------------------------------------------
+
+def _fake_keychain(mapping):
+    def _get(service, account):
+        return mapping.get((service, account), "")
+    return _get
+
+
+def test_resolve_api_key_from_keychain_default_account(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        keys_mod, "_keychain_get",
+        _fake_keychain({("llmclient:openrouter", "default"): "sk-or-default"}),
+    )
+    assert resolve_api_key("openrouter", "") == "sk-or-default"
+
+
+def test_resolve_api_key_keychain_beats_config_file(tmp_path, monkeypatch):
+    (tmp_path / "config.yaml").write_text(
+        "openrouter:\n  api_key: sk-from-file\n"
+    )
+    monkeypatch.setattr(config_mod, "_config_dir", tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        keys_mod, "_keychain_get",
+        _fake_keychain({("llmclient:openrouter", "default"): "sk-or-keychain"}),
+    )
+    _clear_cache()
+    assert resolve_api_key("openrouter", "") == "sk-or-keychain"
+
+
+def test_resolve_api_key_env_beats_keychain(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-env")
+    monkeypatch.setattr(
+        keys_mod, "_keychain_get",
+        _fake_keychain({("llmclient:openrouter", "default"): "sk-or-keychain"}),
+    )
+    assert resolve_api_key("openrouter", "") == "sk-or-env"
+
+
+def test_resolve_api_key_named_key_wins_over_default(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        keys_mod, "_keychain_get",
+        _fake_keychain({
+            ("llmclient:openrouter", "default"):  "sk-or-default",
+            ("llmclient:openrouter", "bouncer"):   "sk-or-bouncer",
+        }),
+    )
+    assert resolve_api_key("openrouter", "", key_name="bouncer") == "sk-or-bouncer"
+
+
+def test_resolve_api_key_named_key_falls_back_to_default(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        keys_mod, "_keychain_get",
+        _fake_keychain({("llmclient:openrouter", "default"): "sk-or-default"}),
+    )
+    assert resolve_api_key("openrouter", "", key_name="bouncer") == "sk-or-default"
+
+
+def test_resolve_api_key_configure_app_used_as_key_name(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        keys_mod, "_keychain_get",
+        _fake_keychain({("llmclient:openrouter", "bouncer"): "sk-or-bouncer"}),
+    )
+    monkeypatch.setattr(config_mod, "_app", "bouncer")
+    assert resolve_api_key("openrouter", "") == "sk-or-bouncer"
+
+
+def test_keychain_get_returns_empty_on_missing_security_binary(monkeypatch):
+    def _raise(*a, **k):
+        raise FileNotFoundError("no security binary")
+    monkeypatch.setattr(keys_mod.subprocess, "run", _raise)
+    assert keys_mod._keychain_get("llmclient:openrouter", "default") == ""
+
+
+def test_keychain_get_returns_empty_on_nonzero_exit(monkeypatch):
+    class _Result:
+        returncode = 44
+        stdout = ""
+    monkeypatch.setattr(keys_mod.subprocess, "run", lambda *a, **k: _Result())
+    assert keys_mod._keychain_get("llmclient:openrouter", "default") == ""
 
 
 # ---------------------------------------------------------------------------

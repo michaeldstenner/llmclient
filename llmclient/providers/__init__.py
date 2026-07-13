@@ -33,7 +33,7 @@ def dispatch(
     if provider == "ollama":
         from .ollama import call_ollama
         return call_ollama(system, user, cfg, resolved_url, abort_event)
-    if provider in ("openai", "openai_compatible"):
+    if provider in ("openai", "openai_compatible", "openrouter"):
         from .openai import call_openai
         return call_openai(system, user, cfg, resolved_url, resolved_api_key)
     if provider == "anthropic":
@@ -59,7 +59,7 @@ def dispatch_embed(
     if cfg.provider == "ollama":
         from .ollama import embed_ollama
         return embed_ollama(text, cfg, resolved_url)
-    if cfg.provider in ("openai", "openai_compatible"):
+    if cfg.provider in ("openai", "openai_compatible", "openrouter"):
         from .openai import embed_openai
         return embed_openai(text, cfg, resolved_url, resolved_api_key)
     return _EmbedProviderResult(

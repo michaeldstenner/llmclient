@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.10.0] — 2026-07-13
+
+### Added
+
+- **Keychain-backed API key resolution.** `resolve_api_key()` gains a
+  Keychain step between the env-var and config-file steps, read via
+  the `security` CLI (`subprocess`) — no new dependency. Chain is now
+  `explicit -> env var -> Keychain -> config.yaml/keys.yaml`.
+- **Named keys.** Keychain entries are
+  `service="llmclient:<provider>"`, `account=<key name>`. The key name
+  resolves from an explicit `key_name` arg, then `configure(app=...)`,
+  then `"default"`; a missing named account falls back to `default`
+  before the config file. Lets one caller (e.g. `configure(app=
+  "bouncer")`) get its own key while others share `default`.
+- **`openrouter` is a first-class provider.** New
+  `_DEFAULT_URLS`/`_ENV_API_KEYS` entries (`OPENROUTER_API_KEY`), a
+  `LLMClient.openrouter()` convenience constructor, and dispatch routes
+  it through the existing OpenAI-compatible transport. See
+  `docs/storage-and-config-model.md` for the base-URL gotcha (no
+  `/v1` suffix — the transport appends it).
+
+### Docs
+
+- `storage-and-config-model.md`: documented the implemented key
+  resolution chain, named-key scheme, and `security` commands to
+  add/rotate/remove a key.
+
 ## [0.9.3] — 2026-06-12
 
 ### Fixed

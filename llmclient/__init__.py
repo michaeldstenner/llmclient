@@ -27,6 +27,9 @@ class LLMConfig:
     url:          str  = ""
     timeout:      int  = 60
     api_key:      str  = ""
+    # Keychain account name for named-key resolution (see _keys.py).  Falls
+    # back to configure(app=...) then "default" when unset.
+    key_name:     str  = ""
     keep_alive:   str  = "60m"
     num_ctx_auto: bool = True
     log_caller:   str  = ""
@@ -153,7 +156,7 @@ class LLMClient:
         self._abort = abort_event
         from ._keys import resolve_url, resolve_api_key
         self._url     = resolve_url(cfg.provider, cfg.url)
-        self._api_key = resolve_api_key(cfg.provider, cfg.api_key)
+        self._api_key = resolve_api_key(cfg.provider, cfg.api_key, cfg.key_name)
 
     @property
     def cfg(self) -> LLMConfig:
@@ -438,6 +441,19 @@ class LLMClient:
     ) -> "LLMClient":
         return cls(
             LLMConfig(provider="openai_compatible", model=model, queue_mode="off", **kwargs),
+            abort_event=abort_event,
+        )
+
+    @classmethod
+    def openrouter(
+        cls,
+        model: str,
+        *,
+        abort_event: threading.Event | None = None,
+        **kwargs,
+    ) -> "LLMClient":
+        return cls(
+            LLMConfig(provider="openrouter", model=model, queue_mode="off", **kwargs),
             abort_event=abort_event,
         )
 
