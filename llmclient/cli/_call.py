@@ -5,24 +5,38 @@ from .. import LLMClient, LLMConfig
 
 
 def cmd_call(args) -> None:
+    from .._discovery import configured_models
+
     prompt    = " ".join(args.prompt)
-    provider  = args.provider
     model     = args.model
     system    = args.system
     timeout   = args.timeout
     no_queue  = getattr(args, "no_queue", False)
     emit_json = getattr(args, "json", False)
 
-    queue_mode = "off" if no_queue else (
-        "cooperative" if provider == "ollama" else "off"
-    )
-
-    cfg    = LLMConfig(
-        provider=provider, model=model,
-        timeout=timeout, queue_mode=queue_mode,
-        log_caller="llmc",
-    )
-    client = LLMClient(cfg)
+    # A bare -m may name a stanza in config.yaml's `models:` section; an
+    # explicit -p means the caller is naming a provider's model id.
+    if args.provider is None and model in configured_models():
+        overrides = {"log_caller": "llmc"}
+        if timeout is not None:
+            overrides["timeout"] = timeout
+        if no_queue:
+            overrides["queue_mode"] = "off"
+        client   = LLMClient.from_name(model, **overrides)
+        provider = client.cfg.provider
+        model    = client.cfg.model
+    else:
+        provider   = args.provider or "ollama"
+        queue_mode = "off" if no_queue else (
+            "cooperative" if provider == "ollama" else "off"
+        )
+        cfg = LLMConfig(
+            provider=provider, model=model,
+            timeout=60 if timeout is None else timeout,
+            queue_mode=queue_mode,
+            log_caller="llmc",
+        )
+        client = LLMClient(cfg)
 
     print(f"calling {provider}/{model}...", flush=True)
     result = client.call(prompt, system=system)

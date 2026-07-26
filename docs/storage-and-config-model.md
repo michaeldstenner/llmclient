@@ -214,6 +214,23 @@ the OpenAI-compatible transport appends `/v1/chat/completions` itself
 — using OpenRouter's own published base URL
 (`https://openrouter.ai/api/v1`) here would double up the path.
 
+## Named models and backend discovery (implemented, 2026-07-26)
+
+`config.yaml` gained an optional `models:` section mapping a short name
+to `provider` + `model` + any `LLMConfig` knob, resolved by
+`LLMClient.from_name()`.  Supporting it required generalizing
+`_parse_simple_yaml()` from two levels to arbitrary nesting depth —
+still a hand-rolled YAML subset, still no PyYAML dependency, and
+existing provider stanzas parse identically.
+
+The companion read path lives in `_discovery.py`: provider status
+(resolved URL + which resolution step supplied the key, never the key
+itself) and live per-provider catalogs, surfaced as `llmc providers` /
+`llmc models`.  Note this is a *different* sense of "discoverability"
+than the participant registry above: that one answers "who is using
+this Ollama box", this one answers "what can I call".  See
+`discovery.md`.
+
 ## Implementation note (pending)
 
 This is a **breaking change** to config resolution and storage paths, so

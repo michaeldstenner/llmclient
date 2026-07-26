@@ -3,6 +3,13 @@ from collections.abc import Iterable
 import threading
 
 from ._config import configure
+from ._discovery import (      # noqa: F401  (public discovery API)
+    catalog,
+    configured_models,
+    list_provider_models,
+    provider_status,
+    all_provider_status,
+)
 
 _RETRYABLE = {
     # first_token covers the model cold-load case (the retryable
@@ -499,6 +506,26 @@ class LLMClient:
             LLMConfig(provider=provider, model=model, queue_mode=queue_mode, **kwargs),
             abort_event=abort_event,
         )
+
+    @classmethod
+    def from_name(
+        cls,
+        name: str,
+        *,
+        abort_event: threading.Event | None = None,
+        **overrides,
+    ) -> "LLMClient":
+        """Build a client from a name in config.yaml's `models:` section.
+
+        Lets callers (and agents driving them) refer to "fast" or
+        "big-local" without hard-coding a provider and model id.  Raises
+        KeyError, listing the known names, if `name` isn't configured.
+        See llmclient.configured_models().
+        """
+        from ._discovery import resolve_named
+        stanza = resolve_named(name)
+        stanza.update(overrides)
+        return cls.from_dict(stanza, abort_event=abort_event)
 
     @classmethod
     def from_dict(

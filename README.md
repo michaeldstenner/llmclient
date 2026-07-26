@@ -226,10 +226,16 @@ llmc --dir ~/.local/share/bouncer/ log --all
 `url` and `api_key` are resolved in this order (first non-empty wins):
 
 1. Explicit value in `LLMConfig`
-2. Standard env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)
-3. `{config_dir}/config.yaml` (if `configure(config_dir=...)` was called)
-4. `~/.config/llmclient/config.yaml`
-5. `~/.config/llmclient/keys.yaml` (legacy name, still supported)
+2. Standard env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+   `OPENROUTER_API_KEY`)
+3. macOS Keychain, service `llmclient:<provider>`, account from
+   `key_name` / `configure(app=...)` / `default`
+4. `{config_dir}/config.yaml` (if `configure(config_dir=...)` was called)
+5. `~/.config/llmclient/config.yaml`
+6. `~/.config/llmclient/keys.yaml` (legacy name, still supported)
+
+`llmc providers` shows which step won for each provider without
+printing the key.
 
 **`config.yaml`** format (same for app-specific and global):
 
@@ -243,6 +249,17 @@ openai:
 ollama:
   url: http://localhost:11434
   parallel_slots: 4   # must match OLLAMA_NUM_PARALLEL
+
+# Optional: short names for the models this machine actually uses.
+# `LLMClient.from_name("fast")`, `llmc call -m fast ...`
+models:
+  fast:
+    provider: openrouter
+    model: anthropic/claude-haiku-4.5
+    timeout: 30
+  local:
+    provider: ollama
+    model: qwen3:32b
 ```
 
 `parallel_slots` sets the per-model global cap for the cooperative
@@ -374,7 +391,13 @@ llmc call -m MODEL PROMPT               # single call, full timing
 llmc call -m MODEL -s "system prompt" PROMPT
 llmc call -m MODEL --json PROMPT        # full LLMResult as JSON
 llmc call -p anthropic -m MODEL PROMPT
+llmc call -m fast PROMPT                # a name from config.yaml `models:`
 llmc parallel -m MODEL -n 4 PROMPT     # N concurrent calls
+
+llmc providers                          # which backends are on the table
+llmc models                             # named models + per-provider counts
+llmc models -p openrouter --filter claude
+llmc models --json                      # whole picture, machine-readable
 ```
 
 `llmc status` shows:
@@ -382,6 +405,11 @@ llmc parallel -m MODEL -n 4 PROMPT     # N concurrent calls
 - All direct connections to `:11434` grouped by process, with the
   script path for Python/bash processes and saturation warnings
 - llmclient queue state
+
+`llmc providers` and `llmc models` answer "what can this machine
+call?" — resolved URLs, whether a key resolves (and from where, never
+the key itself), and each provider's live catalog.  See
+[docs/discovery.md](docs/discovery.md).
 
 `llmc parallel` bypasses the queue and sends N requests
 simultaneously, reporting per-request timing and overall speedup

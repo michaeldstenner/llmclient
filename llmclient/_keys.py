@@ -46,22 +46,39 @@ from ._config import _register_cache_clearer  # noqa: E402
 _register_cache_clearer(_clear_cache)
 
 
+def _strip_quotes(val: str) -> str:
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+        return val[1:-1]
+    return val
+
+
 def _parse_simple_yaml(text: str) -> dict:
-    """Parse the two-level key: value YAML subset used by config.yaml."""
-    result: dict = {}
-    section: str | None = None
+    """Parse the indented `key: value` YAML subset used by config.yaml.
+
+    Nesting is arbitrary-depth (the `models:` section needs three
+    levels); scalar values are always returned as strings.  A key with
+    an empty value opens a nested mapping.
+    """
+    root: dict = {}
+    # (indent of the key that opened the container, container)
+    stack: list[tuple[int, dict]] = [(-1, root)]
     for line in text.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
             continue
-        if not line[0].isspace():
-            if stripped.endswith(":"):
-                section = stripped[:-1]
-                result[section] = {}
-        elif section and ":" in stripped:
-            key, _, val = stripped.partition(":")
-            result[section][key.strip()] = val.strip()
-    return result
+        indent = len(line) - len(line.lstrip())
+        while indent <= stack[-1][0]:
+            stack.pop()
+        container = stack[-1][1]
+        key, _, val = stripped.partition(":")
+        key, val = key.strip(), val.strip()
+        if val:
+            container[key] = _strip_quotes(val)
+        else:
+            child: dict = {}
+            container[key] = child
+            stack.append((indent, child))
+    return root
 
 
 def _load_config() -> dict:
@@ -76,7 +93,10 @@ def _load_config() -> dict:
             try:
                 data = _parse_simple_yaml(path.read_text(encoding="utf-8"))
                 for section, values in data.items():
-                    if section not in merged:
+                    if not isinstance(values, dict):
+                        merged[section] = values
+                        continue
+                    if not isinstance(merged.get(section), dict):
                         merged[section] = {}
                     merged[section].update(values)
             except Exception:
@@ -88,8 +108,8 @@ def _load_config() -> dict:
 def resolve_url(provider: str, explicit: str) -> str:
     if explicit:
         return explicit.rstrip("/")
-    cfg = _load_config()
-    from_file = cfg.get(provider, {}).get("url", "")
+    section = _load_config().get(provider, {})
+    from_file = section.get("url", "") if isinstance(section, dict) else ""
     if from_file:
         return from_file.rstrip("/")
     return _DEFAULT_URLS.get(provider, "").rstrip("/")
@@ -128,26 +148,49 @@ def _resolve_key_name(key_name: str) -> str:
     return "default"
 
 
-def resolve_api_key(provider: str, explicit: str, key_name: str = "") -> str:
+def resolve_api_key_with_source(
+    provider: str, explicit: str = "", key_name: str = ""
+) -> tuple[str, str]:
+    """Resolve a key and report *where* it came from.
+
+    The source string is safe to display (it never contains the key
+    itself); ("", "") means no key was found anywhere.
+    """
     if explicit:
-        return explicit
+        return explicit, "explicit"
     env_var = _ENV_API_KEYS.get(provider, "")
     if env_var:
         from_env = os.environ.get(env_var, "")
         if from_env:
-            return from_env
+            return from_env, f"env:{env_var}"
 
     service = f"llmclient:{provider}"
     account = _resolve_key_name(key_name)
     from_keychain = _keychain_get(service, account)
     if from_keychain:
-        return from_keychain
+        return from_keychain, f"keychain:{account}"
     if account != "default":
         from_keychain_default = _keychain_get(service, "default")
         if from_keychain_default:
-            return from_keychain_default
+            return from_keychain_default, "keychain:default"
 
-    return _load_config().get(provider, {}).get("api_key", "")
+    section = _load_config().get(provider, {})
+    from_file = section.get("api_key", "") if isinstance(section, dict) else ""
+    if from_file:
+        return from_file, f"config:{provider}.api_key"
+    return "", ""
+
+
+def resolve_api_key(provider: str, explicit: str, key_name: str = "") -> str:
+    return resolve_api_key_with_source(provider, explicit, key_name)[0]
+
+
+def describe_api_key(provider: str, key_name: str = "") -> str:
+    """Source string for `provider`'s key, or "" if none resolves.
+
+    Never returns the key — intended for status output.
+    """
+    return resolve_api_key_with_source(provider, "", key_name)[1]
 
 
 def get_parallel_slots() -> int:

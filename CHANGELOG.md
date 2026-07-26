@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.11.0] — 2026-07-26
+
+### Added
+
+- **Discovery: "what can this machine call?"** New `llmc providers`
+  (resolved URL + whether a key resolves, and from where — never the
+  key itself) and `llmc models` (named models plus each provider's
+  live catalog: Ollama `/api/tags`, Anthropic `/v1/models`,
+  OpenAI-compatible `/v1/models`). `--json` on either emits the whole
+  picture for an agent to consume. See `docs/discovery.md`.
+- **Named models.** Optional `models:` section in `config.yaml` maps a
+  short name to a provider + model id + any `LLMConfig` knobs.
+  `LLMClient.from_name("fast")` builds a client from one; `llmc call
+  -m fast PROMPT` resolves a bare `-m` as a name when no `-p` is given.
+- **Library discovery API** (all additive): `configured_models()`,
+  `provider_status()`, `all_provider_status()`,
+  `list_provider_models()`, `catalog()`.
+- **`llmc --config-dir PATH`** overlays another `config.yaml` on the
+  global one, matching `configure(config_dir=...)`.
+
+### Changed
+
+- The `config.yaml` parser now supports arbitrary-depth nesting (the
+  `models:` section needs three levels) and strips quotes from scalar
+  values. Existing two-level provider stanzas parse identically.
+- `llmc call`: `-p` now defaults to `None` rather than `"ollama"`, so a
+  named model can supply the provider. An omitted `-p` with an
+  unrecognized `-m` still means Ollama, as before.
+
 ## [0.10.0] — 2026-07-13
 
 ### Added
