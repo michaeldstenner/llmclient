@@ -176,6 +176,8 @@ configured default. `url` and `api_key` are ignored.
 | `response_chars` | int | `len(text)` or 0 on failure |
 | `prompt_tokens` | int \| None | From provider response body |
 | `response_tokens` | int \| None | From provider response body |
+| `num_ctx` | int \| None | Context size actually sent, after the high-water-mark ratchet (Ollama with `num_ctx_auto`; None elsewhere) |
+| `num_ctx_want` | int \| None | Context size this call alone needed, before the ratchet; the gap to `num_ctx` is the ratchet's inflation |
 | `queue_snapshot` | list[dict] \| None | Queue state at timeout; present on `timeout:queue_wait` and `timeout:queue_stall`; each entry: `{id, pid, caller, model, priority, status, age_s, running_s}` |
 | `is_success` | bool | `True` when `outcome == "success"` (property) |
 
@@ -292,11 +294,20 @@ When `log_caller` is set, one line is appended to
   "elapsed_s":        19.4,
   "outcome":          "success",
   "response_chars":   87,
+  "num_ctx":          32768,
+  "num_ctx_want":     4096,
   "context":          {}
 }
 ```
 
 `elapsed_s` is `queue_wait_s + call_s` (total wall-clock).
+
+`num_ctx` / `num_ctx_want` are Ollama-only (`null` for other providers
+and for embeddings).  `num_ctx_want` is what the auto-sizer computed for
+this prompt; `num_ctx` is what was sent after the upward-only ratchet.
+A persistent gap between them means the ratchet is holding the model at
+a larger context than any single caller needs — the number to check
+before capping `OLLAMA_CONTEXT_LENGTH`.
 
 Quick diagnostics:
 

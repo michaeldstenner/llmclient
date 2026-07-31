@@ -6,7 +6,7 @@ import pytest
 
 import llmclient._config as config_mod
 from llmclient._log import write_log
-from llmclient import LLMResult
+from llmclient import EmbedResult, LLMResult
 from tests.conftest import make_cfg
 
 
@@ -26,6 +26,21 @@ def _result(**kwargs) -> LLMResult:
     )
     defaults.update(kwargs)
     return LLMResult(**defaults)
+
+
+def _embed_result(**kwargs) -> EmbedResult:
+    defaults = dict(
+        vector=[0.1, 0.2, 0.3],
+        outcome="success",
+        total_s=0.06,
+        queue_wait_s=0.001,
+        call_s=0.059,
+        load_s=0.03,
+        prompt_chars=28,
+        prompt_tokens=9,
+    )
+    defaults.update(kwargs)
+    return EmbedResult(**defaults)
 
 
 @pytest.fixture(autouse=True)
@@ -143,3 +158,65 @@ def test_snapshot_included_when_present(tmp_path):
     write_log(cfg, "call", _result(outcome="timeout:queue_wait", queue_snapshot=snap), None)
     e = _read_entries(tmp_path)[0]
     assert e["queue_snapshot"] == snap
+
+
+# ---------------------------------------------------------------------------
+# Embed results
+#
+# EmbedResult carries generation-only fields as zero/None defaults purely so
+# write_log() can build one entry shape for both result types.  These tests
+# pin that down: any field write_log reads must survive an EmbedResult, or
+# the bare `except Exception: pass` turns the whole embed call into a silent
+# logging no-op.
+# ---------------------------------------------------------------------------
+
+def test_embed_result_is_logged(tmp_path):
+    cfg = make_cfg(log_caller="squirrel", provider="ollama",
+                   model="nomic-embed-text")
+    write_log(cfg, "embed", _embed_result(), None)
+
+    entries = _read_entries(tmp_path)
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["caller"] == "squirrel"
+    assert e["operation"] == "embed"
+    assert e["model"] == "nomic-embed-text"
+    assert e["outcome"] == "success"
+    assert e["elapsed_s"] == 0.06
+    assert e["queue_wait_s"] == 0.001
+    assert e["call_s"] == 0.059
+    assert e["load_s"] == 0.03
+    assert e["prompt_chars"] == 28
+    assert e["prompt_tokens"] == 9
+    assert "timestamp" in e
+    assert "prompt_tokens_est" in e
+
+
+def test_embed_entry_has_same_keys_as_generation_entry(tmp_path):
+    cfg = make_cfg(log_caller="app")
+    write_log(cfg, "call", _result(), None)
+    write_log(cfg, "embed", _embed_result(), None)
+    gen, emb = _read_entries(tmp_path)
+    assert emb.keys() == gen.keys()
+
+
+def test_embed_entry_generation_only_fields_are_empty(tmp_path):
+    cfg = make_cfg(log_caller="app")
+    write_log(cfg, "embed", _embed_result(), None)
+    e = _read_entries(tmp_path)[0]
+    assert e["response_chars"] == 0
+    assert e["response_tokens"] is None
+    assert e["inference_s"] == 0.0
+    assert e["num_ctx"] is None
+    assert e["num_ctx_want"] is None
+
+
+def test_embed_failure_logged_at_errors_level(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_mod, "_log_level", "errors")
+    cfg = make_cfg(log_caller="app")
+    write_log(cfg, "embed", _embed_result(outcome="success"), None)
+    write_log(cfg, "embed",
+              _embed_result(vector=None, outcome="error:unreachable"), None)
+    entries = _read_entries(tmp_path)
+    assert len(entries) == 1
+    assert entries[0]["outcome"] == "error:unreachable"

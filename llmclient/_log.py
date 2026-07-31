@@ -46,6 +46,13 @@ def write_log(cfg, operation: str, result, context: dict | None) -> None:
             "prompt_tokens":     result.prompt_tokens,
             "response_chars":    result.response_chars,
             "response_tokens":   result.response_tokens,
+            # Ollama only; None elsewhere. num_ctx is what was sent after
+            # the high-water-mark ratchet, num_ctx_want what this call
+            # alone needed. Logging both makes the ratchet's inflation
+            # measurable per caller -- the number that decides whether
+            # OLLAMA_CONTEXT_LENGTH can safely be capped.
+            "num_ctx":           getattr(result, "num_ctx", None),
+            "num_ctx_want":      getattr(result, "num_ctx_want", None),
         }
         if snap:
             entry["queue_snapshot"] = snap

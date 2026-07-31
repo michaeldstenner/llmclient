@@ -178,6 +178,26 @@ def call_ollama(
     base_url: str,
     abort_event: threading.Event | None,
 ) -> _ProviderResult:
+    """Thin wrapper that stamps the context sizing onto whichever result
+    the implementation returns. _call_ollama_impl has many early-return
+    paths (timeouts, aborts, HTTP errors); stamping here rather than at
+    each site means the sizing is recorded even when the call fails --
+    which is exactly when an oversized context is worth knowing about."""
+    ctx_info: dict = {}
+    pr = _call_ollama_impl(system, user, cfg, base_url, abort_event, ctx_info)
+    pr.num_ctx      = ctx_info.get("applied")
+    pr.num_ctx_want = ctx_info.get("want")
+    return pr
+
+
+def _call_ollama_impl(
+    system: str,
+    user: str,
+    cfg,
+    base_url: str,
+    abort_event: threading.Event | None,
+    ctx_info: dict,
+) -> _ProviderResult:
     model       = cfg.model
     timeout     = int(cfg.extra_params.get("timeout", cfg.timeout))
     keep_alive  = cfg.extra_params.get("keep_alive", cfg.keep_alive)
@@ -222,6 +242,7 @@ def call_ollama(
     # momentary /api/ps gap doesn't collapse it.  Relaxes only after
     # keep_alive has plausibly expired.
     if "num_ctx" in options:
+        ctx_info["want"] = options["num_ctx"]
         hwm_key = (base_url, model)
         now = time.monotonic()
         ka_s = _parse_keep_alive_s(keep_alive)
@@ -239,6 +260,8 @@ def call_ollama(
 
             options["num_ctx"] = max(options["num_ctx"], floor)
             _ctx_hwm[hwm_key] = (options["num_ctx"], now)
+
+        ctx_info["applied"] = options["num_ctx"]
 
     think = cfg.extra_params.get("think", False)
 

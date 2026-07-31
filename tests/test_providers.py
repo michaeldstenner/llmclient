@@ -82,9 +82,11 @@ def test_ollama_num_ctx_auto_sizing():
         )
 
     with patch("urllib.request.urlopen", side_effect=capture_urlopen):
-        call_ollama(system, user, cfg, "http://localhost:11434", None)
+        r = call_ollama(system, user, cfg, "http://localhost:11434", None)
 
     assert captured_payload["options"]["num_ctx"] == 8192
+    # No ratchet in play, so want == applied.
+    assert (r.num_ctx, r.num_ctx_want) == (8192, 8192)
 
 
 def test_ollama_num_ctx_ratchet_persists_hwm():
@@ -113,9 +115,11 @@ def test_ollama_num_ctx_ratchet_persists_hwm():
         # _get_loaded_ctx returns None (model not in /api/ps)
         with patch("llmclient.providers.ollama._get_loaded_ctx", return_value=None), \
              patch("urllib.request.urlopen", side_effect=capture):
-            call_ollama("s", "u", cfg, "http://localhost:11434", None)
+            r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
 
         assert captured_payload["options"]["num_ctx"] == 32768
+        # The reported gap is the ratchet's inflation: 4096 needed, 32768 sent.
+        assert (r.num_ctx, r.num_ctx_want) == (32768, 4096)
     finally:
         with _ctx_hwm_lock:
             if old is None:
@@ -148,10 +152,11 @@ def test_ollama_num_ctx_ratchet_relaxes_after_keep_alive():
 
         with patch("llmclient.providers.ollama._get_loaded_ctx", return_value=None), \
              patch("urllib.request.urlopen", side_effect=capture):
-            call_ollama("s", "u", cfg, "http://localhost:11434", None)
+            r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
 
         # Small prompt, HWM expired, /api/ps empty → auto-sizer picks 4096
         assert captured_payload["options"]["num_ctx"] == 4096
+        assert (r.num_ctx, r.num_ctx_want) == (4096, 4096)
     finally:
         with _ctx_hwm_lock:
             if old is None:
@@ -184,9 +189,10 @@ def test_ollama_num_ctx_ratchet_adopts_live_ctx():
         # /api/ps says 32768 (external load at larger ctx)
         with patch("llmclient.providers.ollama._get_loaded_ctx", return_value=32768), \
              patch("urllib.request.urlopen", side_effect=capture):
-            call_ollama("s", "u", cfg, "http://localhost:11434", None)
+            r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
 
         assert captured_payload["options"]["num_ctx"] == 32768
+        assert (r.num_ctx, r.num_ctx_want) == (32768, 4096)
     finally:
         with _ctx_hwm_lock:
             if old is None:
@@ -218,9 +224,36 @@ def test_ollama_num_ctx_not_set_when_disabled():
         )
 
     with patch("urllib.request.urlopen", side_effect=capture):
-        call_ollama("s", "u", cfg, "http://localhost:11434", None)
+        r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
 
     assert "num_ctx" not in captured_payload["options"]
+    assert (r.num_ctx, r.num_ctx_want) == (None, None)
+
+
+def test_ollama_num_ctx_reported_on_failure():
+    """Sizing is stamped on failure results too -- an oversized context is
+    most worth knowing about on the call that timed out."""
+    from llmclient.providers.ollama import _ctx_hwm, _ctx_hwm_lock
+    hwm_key = ("http://localhost:11434", "test:7b")
+
+    # The HWM is process-global and earlier tests leave entries in it; drop
+    # this key so the sizing under test is the auto-sizer's alone.
+    with _ctx_hwm_lock:
+        old = _ctx_hwm.pop(hwm_key, None)
+
+    try:
+        cfg = _ollama_cfg(num_ctx_auto=True)
+        with patch("llmclient.providers.ollama._get_loaded_ctx", return_value=None), \
+             mock_urlopen_timeout():
+            r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
+        assert not r.text
+        assert (r.num_ctx, r.num_ctx_want) == (4096, 4096)
+    finally:
+        with _ctx_hwm_lock:
+            if old is None:
+                _ctx_hwm.pop(hwm_key, None)
+            else:
+                _ctx_hwm[hwm_key] = old
 
 
 def test_ollama_timeout_non_streaming():

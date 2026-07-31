@@ -85,6 +85,10 @@ class LLMResult:
     prompt_tokens:   int | None
     response_tokens: int | None
     queue_snapshot:  list[dict] | None = None
+    # Ollama only; None elsewhere. See _ProviderResult for the
+    # num_ctx / num_ctx_want distinction.
+    num_ctx:         int | None = None
+    num_ctx_want:    int | None = None
 
     @property
     def is_success(self) -> bool:
@@ -327,6 +331,8 @@ class LLMClient:
                 response_chars=len(pr.text) if pr.text else 0,
                 prompt_tokens=pr.prompt_tokens,
                 response_tokens=pr.response_tokens,
+                num_ctx=getattr(pr, "num_ctx", None),
+                num_ctx_want=getattr(pr, "num_ctx_want", None),
             )
             if result.outcome not in _RETRYABLE:
                 break

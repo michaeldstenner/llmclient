@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.12.0] — 2026-07-31
+
+### Added
+
+- **Context sizing is now observable.** `LLMResult` gains `num_ctx`
+  (what was actually sent to Ollama, after the upward-only high-water-mark
+  ratchet) and `num_ctx_want` (what this call alone needed). Both are
+  `None` for non-Ollama providers and for embeddings. Both are written to
+  the JSONL call log, so the ratchet's inflation is measurable per caller
+  — the number that decides whether `OLLAMA_CONTEXT_LENGTH` can safely be
+  capped.
+  - The fields are stamped by a thin wrapper around the Ollama call, so
+    they survive the failure paths (timeout, abort, HTTP error) — which is
+    exactly when an oversized context is worth knowing about.
+
+### Tests
+
+- Embed-result logging is now pinned: an `EmbedResult` must produce the
+  same entry shape as an `LLMResult`, with generation-only fields empty.
+  Without this, any field `write_log()` reads that `EmbedResult` lacks
+  would be swallowed by its `except Exception: pass` and silently turn
+  embed logging into a no-op.
+
 ## [0.11.0] — 2026-07-26
 
 ### Added

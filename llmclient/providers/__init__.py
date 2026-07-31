@@ -10,6 +10,12 @@ class _ProviderResult:
     load_s:          float      # model cold-start (Ollama field; else 0.0)
     prompt_tokens:   int | None
     response_tokens: int | None
+    # Ollama only; None elsewhere. num_ctx is what was actually sent,
+    # after the upward-only high-water-mark ratchet. num_ctx_want is
+    # what this call alone needed. The gap between them is the ratchet's
+    # inflation -- the number that decides whether a context cap is safe.
+    num_ctx:         int | None = None
+    num_ctx_want:    int | None = None
 
 
 @dataclass
