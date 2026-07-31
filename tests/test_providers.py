@@ -91,114 +91,85 @@ def test_ollama_num_ctx_auto_sizing():
 
 def test_ollama_num_ctx_ratchet_persists_hwm():
     """High-water mark survives when /api/ps returns None."""
-    from llmclient.providers.ollama import _ctx_hwm, _ctx_hwm_lock
-    hwm_key = ("http://localhost:11434", "test:7b")
+    from llmclient.providers.ollama import _ctx_hwm
 
     # Seed the HWM as if a prior large-context call happened recently
-    with _ctx_hwm_lock:
-        old = _ctx_hwm.get(hwm_key)
-        _ctx_hwm[hwm_key] = (32768, time.monotonic())
+    _ctx_hwm[("http://localhost:11434", "test:7b")] = (32768, time.monotonic())
 
-    try:
-        cfg = _ollama_cfg(num_ctx_auto=True, keep_alive="60m")
-        # Small prompt → auto-sizer picks 4096
-        captured_payload = {}
+    cfg = _ollama_cfg(num_ctx_auto=True, keep_alive="60m")
+    # Small prompt → auto-sizer picks 4096
+    captured_payload = {}
 
-        def capture(req, timeout=None):
-            captured_payload.update(json.loads(req.data))
-            return MagicMock(
-                read=lambda: json.dumps(OLLAMA_SUCCESS_BODY).encode(),
-                __enter__=lambda s: s,
-                __exit__=MagicMock(return_value=False),
-            )
+    def capture(req, timeout=None):
+        captured_payload.update(json.loads(req.data))
+        return MagicMock(
+            read=lambda: json.dumps(OLLAMA_SUCCESS_BODY).encode(),
+            __enter__=lambda s: s,
+            __exit__=MagicMock(return_value=False),
+        )
 
-        # _get_loaded_ctx returns None (model not in /api/ps)
-        with patch("llmclient.providers.ollama._get_loaded_ctx", return_value=None), \
-             patch("urllib.request.urlopen", side_effect=capture):
-            r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
+    # _get_loaded_ctx returns None (model not in /api/ps)
+    with patch("llmclient.providers.ollama._get_loaded_ctx", return_value=None), \
+         patch("urllib.request.urlopen", side_effect=capture):
+        r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
 
-        assert captured_payload["options"]["num_ctx"] == 32768
-        # The reported gap is the ratchet's inflation: 4096 needed, 32768 sent.
-        assert (r.num_ctx, r.num_ctx_want) == (32768, 4096)
-    finally:
-        with _ctx_hwm_lock:
-            if old is None:
-                _ctx_hwm.pop(hwm_key, None)
-            else:
-                _ctx_hwm[hwm_key] = old
+    assert captured_payload["options"]["num_ctx"] == 32768
+    # The reported gap is the ratchet's inflation: 4096 needed, 32768 sent.
+    assert (r.num_ctx, r.num_ctx_want) == (32768, 4096)
 
 
 def test_ollama_num_ctx_ratchet_relaxes_after_keep_alive():
     """HWM relaxes when keep_alive has expired."""
-    from llmclient.providers.ollama import _ctx_hwm, _ctx_hwm_lock
-    hwm_key = ("http://localhost:11434", "test:7b")
+    from llmclient.providers.ollama import _ctx_hwm
 
     # Seed the HWM with an old timestamp (well past keep_alive)
-    with _ctx_hwm_lock:
-        old = _ctx_hwm.get(hwm_key)
-        _ctx_hwm[hwm_key] = (32768, time.monotonic() - 7200)
+    _ctx_hwm[("http://localhost:11434", "test:7b")] = (
+        32768, time.monotonic() - 7200)
 
-    try:
-        cfg = _ollama_cfg(num_ctx_auto=True, keep_alive="60m")
-        captured_payload = {}
+    cfg = _ollama_cfg(num_ctx_auto=True, keep_alive="60m")
+    captured_payload = {}
 
-        def capture(req, timeout=None):
-            captured_payload.update(json.loads(req.data))
-            return MagicMock(
-                read=lambda: json.dumps(OLLAMA_SUCCESS_BODY).encode(),
-                __enter__=lambda s: s,
-                __exit__=MagicMock(return_value=False),
-            )
+    def capture(req, timeout=None):
+        captured_payload.update(json.loads(req.data))
+        return MagicMock(
+            read=lambda: json.dumps(OLLAMA_SUCCESS_BODY).encode(),
+            __enter__=lambda s: s,
+            __exit__=MagicMock(return_value=False),
+        )
 
-        with patch("llmclient.providers.ollama._get_loaded_ctx", return_value=None), \
-             patch("urllib.request.urlopen", side_effect=capture):
-            r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
+    with patch("llmclient.providers.ollama._get_loaded_ctx", return_value=None), \
+         patch("urllib.request.urlopen", side_effect=capture):
+        r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
 
-        # Small prompt, HWM expired, /api/ps empty → auto-sizer picks 4096
-        assert captured_payload["options"]["num_ctx"] == 4096
-        assert (r.num_ctx, r.num_ctx_want) == (4096, 4096)
-    finally:
-        with _ctx_hwm_lock:
-            if old is None:
-                _ctx_hwm.pop(hwm_key, None)
-            else:
-                _ctx_hwm[hwm_key] = old
+    # Small prompt, HWM expired, /api/ps empty → auto-sizer picks 4096
+    assert captured_payload["options"]["num_ctx"] == 4096
+    assert (r.num_ctx, r.num_ctx_want) == (4096, 4096)
 
 
 def test_ollama_num_ctx_ratchet_adopts_live_ctx():
     """If /api/ps reports a higher ctx than HWM, adopt it."""
-    from llmclient.providers.ollama import _ctx_hwm, _ctx_hwm_lock
-    hwm_key = ("http://localhost:11434", "test:7b")
+    from llmclient.providers.ollama import _ctx_hwm
 
-    with _ctx_hwm_lock:
-        old = _ctx_hwm.get(hwm_key)
-        _ctx_hwm[hwm_key] = (8192, time.monotonic())
+    _ctx_hwm[("http://localhost:11434", "test:7b")] = (8192, time.monotonic())
 
-    try:
-        cfg = _ollama_cfg(num_ctx_auto=True, keep_alive="60m")
-        captured_payload = {}
+    cfg = _ollama_cfg(num_ctx_auto=True, keep_alive="60m")
+    captured_payload = {}
 
-        def capture(req, timeout=None):
-            captured_payload.update(json.loads(req.data))
-            return MagicMock(
-                read=lambda: json.dumps(OLLAMA_SUCCESS_BODY).encode(),
-                __enter__=lambda s: s,
-                __exit__=MagicMock(return_value=False),
-            )
+    def capture(req, timeout=None):
+        captured_payload.update(json.loads(req.data))
+        return MagicMock(
+            read=lambda: json.dumps(OLLAMA_SUCCESS_BODY).encode(),
+            __enter__=lambda s: s,
+            __exit__=MagicMock(return_value=False),
+        )
 
-        # /api/ps says 32768 (external load at larger ctx)
-        with patch("llmclient.providers.ollama._get_loaded_ctx", return_value=32768), \
-             patch("urllib.request.urlopen", side_effect=capture):
-            r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
+    # /api/ps says 32768 (external load at larger ctx)
+    with patch("llmclient.providers.ollama._get_loaded_ctx", return_value=32768), \
+         patch("urllib.request.urlopen", side_effect=capture):
+        r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
 
-        assert captured_payload["options"]["num_ctx"] == 32768
-        assert (r.num_ctx, r.num_ctx_want) == (32768, 4096)
-    finally:
-        with _ctx_hwm_lock:
-            if old is None:
-                _ctx_hwm.pop(hwm_key, None)
-            else:
-                _ctx_hwm[hwm_key] = old
+    assert captured_payload["options"]["num_ctx"] == 32768
+    assert (r.num_ctx, r.num_ctx_want) == (32768, 4096)
 
 
 def test_parse_keep_alive_s():
@@ -233,27 +204,12 @@ def test_ollama_num_ctx_not_set_when_disabled():
 def test_ollama_num_ctx_reported_on_failure():
     """Sizing is stamped on failure results too -- an oversized context is
     most worth knowing about on the call that timed out."""
-    from llmclient.providers.ollama import _ctx_hwm, _ctx_hwm_lock
-    hwm_key = ("http://localhost:11434", "test:7b")
-
-    # The HWM is process-global and earlier tests leave entries in it; drop
-    # this key so the sizing under test is the auto-sizer's alone.
-    with _ctx_hwm_lock:
-        old = _ctx_hwm.pop(hwm_key, None)
-
-    try:
-        cfg = _ollama_cfg(num_ctx_auto=True)
-        with patch("llmclient.providers.ollama._get_loaded_ctx", return_value=None), \
-             mock_urlopen_timeout():
-            r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
-        assert not r.text
-        assert (r.num_ctx, r.num_ctx_want) == (4096, 4096)
-    finally:
-        with _ctx_hwm_lock:
-            if old is None:
-                _ctx_hwm.pop(hwm_key, None)
-            else:
-                _ctx_hwm[hwm_key] = old
+    cfg = _ollama_cfg(num_ctx_auto=True)
+    with patch("llmclient.providers.ollama._get_loaded_ctx", return_value=None), \
+         mock_urlopen_timeout():
+        r = call_ollama("s", "u", cfg, "http://localhost:11434", None)
+    assert not r.text
+    assert (r.num_ctx, r.num_ctx_want) == (4096, 4096)
 
 
 def test_ollama_timeout_non_streaming():

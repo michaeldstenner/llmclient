@@ -66,6 +66,26 @@ def mock_urlopen_url_error():
 
 
 # ---------------------------------------------------------------------------
+# Ollama context high-water mark
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def clean_ctx_hwm():
+    """The Ollama context high-water mark is process-global by design --
+    it models the loaded model's context, which is itself process-global.
+    call_ollama() writes to it on every auto-sized call, so leaking into
+    the next test is the default behavior.  Clear it either side of every
+    test: ratchet tests can't contaminate each other, and ordering stays
+    irrelevant."""
+    from llmclient.providers.ollama import _ctx_hwm, _ctx_hwm_lock
+    with _ctx_hwm_lock:
+        _ctx_hwm.clear()
+    yield
+    with _ctx_hwm_lock:
+        _ctx_hwm.clear()
+
+
+# ---------------------------------------------------------------------------
 # Queue DB fixtures
 # ---------------------------------------------------------------------------
 
