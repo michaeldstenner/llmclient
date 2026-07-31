@@ -108,6 +108,15 @@ their cap (admitted-then-starved; see §2). Larger context pushes the auto
 pick toward 1 (4×32k KV won't fit), so growing `num_ctx` (e.g. pithos's
 66k-char prompts) can trigger the drop.
 
+Since v0.12.0 this is measurable rather than inferred: every log row
+carries `num_ctx` (sent, post-ratchet) and `num_ctx_want` (needed by
+that call alone). The ratchet is upward-only per `(url, model)` and
+only relaxes after `keep_alive` expires, so one big prompt holds every
+later caller at the high-water mark. A persistent `num_ctx` ≫
+`num_ctx_want` gap across callers means the ratchet — not real demand —
+is what's pushing Ollama's auto-`NUM_PARALLEL` pick toward 1. That gap
+is the number to check before capping `OLLAMA_CONTEXT_LENGTH` (§4).
+
 **Keep `parallel_slots` == the live `NUM_PARALLEL`.** To pin Ollama:
 - `brew services restart ollama` **regenerates the plist** and Homebrew 4
   loads the formula from its JSON API cache — so editing the plist *or*
@@ -213,6 +222,10 @@ use this — bouncer and watchdog both do, hence shared.)
   `prompt_chars`, `prompt_tokens_est`, `response_tokens`. A row with
   `call_s` pinned at exactly the caller's timeout and `queue_wait_s=0`
   means: admitted immediately, then never got a first token.
+  Since v0.12.0, also `num_ctx` (what was actually sent, after the
+  ratchet) and `num_ctx_want` (what that call alone needed) — Ollama
+  only, `null` elsewhere and for embeddings. See §1 on why the gap
+  between them matters.
 - `queue.db` — SQLite. Tables:
   - `queue(id, pid, caller, priority, caller_max, global_max, status,
     submitted_at, started_at, model)` — live + historical slots.
