@@ -64,12 +64,25 @@ def call_claude_code(
     timeout = int(cfg.extra_params.get("timeout", cfg.timeout))
     t0 = time.monotonic()
 
+    # Surgical strip, not an allowlist: `claude` needs PATH, HOME,
+    # and credential-bearing vars from the parent, so copy the
+    # inherited environment rather than rebuild it. But
+    # UV_PROJECT_ENVIRONMENT must never reach this child — if the
+    # parent (e.g. squirrel-nightly.sh) exported it to pin its own
+    # `uv run`, letting it leak into `claude`'s subprocess tree lets
+    # any `uv run`-launched MCP server `claude` spawns (e.g. almanac)
+    # silently resolve into the wrong venv and rebuild it. See
+    # admin's scratch/venv-poltergeist and scratch/uv-env-fix recons.
+    child_env = os.environ.copy()
+    child_env.pop("UV_PROJECT_ENVIRONMENT", None)
+
     try:
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=child_env,
         )
     except Exception as exc:
         return _ProviderResult(
