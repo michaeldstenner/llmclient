@@ -49,6 +49,11 @@ here. Consequences:
 - To see *actual* traffic and concurrency, use the **Ollama `[GIN]`
   log** (Source Catalog §4), not this file.
 
+This is the default `log_level="errors"`, not a property of the file.
+Since v0.12.1 each log file created carries a `#`-prefixed header
+saying so; files created before that do not, so judge by content.
+Lines starting with `#` are not JSON — skip them when parsing.
+
 ### 3. Effective config ≠ what's in the YAML
 
 Consumers merge built-in defaults *under* the user YAML. bouncer does

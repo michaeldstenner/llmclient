@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.12.1] — 2026-09-19
+
+### Changed
+
+- **The call log now says what it is.** `llmclient_log.jsonl` is named
+  and documented as "one entry per LLM call", but at the default
+  `log_level="errors"` successful calls are dropped — every log file on
+  this machine is 100% non-success. A reader counting lines reads a
+  failure count as a call count. Each log file now gets a `#`-prefixed
+  header, written once when the file is created, saying so in band.
+  - Not a rename: the name is load-bearing in the README, this
+    changelog and the Ollama playbook, and bouncer vendors its own copy
+    that would keep writing the old name — splitting one caller's
+    failures across two files.
+  - The header is written under the same `flock` as the entry, gated on
+    `fstat` size, so racing processes cannot both write one. Strictly
+    append-only: existing live log files are never rewritten and so
+    never gain a header.
+  - `_log.py`'s docstring no longer claims one entry per call without
+    qualification.
+  - Both in-repo readers (`llmc log`, `scripts/fit_breaker_params.py`)
+    already skipped unparseable lines and are unaffected.
+
+### Fixed
+
+- README's storage paragraph was stale: it said `data_dir` controls
+  where `queue.db` *and* the log live and defaults to
+  `~/.local/share/llmclient/`. The queue moved to the shared
+  `~/.local/state/llmclient/queue.db` and the data home is per-`app`.
+
 ## [0.12.0] — 2026-07-31
 
 ### Added

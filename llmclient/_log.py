@@ -1,17 +1,39 @@
 """
-Central JSONL call log — one entry per LLM call.
+Central JSONL call log — one entry per LLM call *that the current log
+level records*.
+
+At the default level ("errors") successful calls are dropped, so the
+file on disk is a failure log, not a call log: a quiet caller that is
+succeeding constantly writes nothing at all.  Line counts therefore
+measure failures, never traffic.  A "#"-prefixed header saying so is
+written into each log file when it is first created (see _HEADER) —
+readers must skip non-JSON lines.
 
 All callers sharing a data_dir write to the same llmclient_log.jsonl.
 fcntl.flock serialises concurrent writes from separate processes.
 
 Log levels (set via llmclient.configure(log_level=...)):
   "off"    — nothing written
-  "errors" — non-success outcomes only
+  "errors" — non-success outcomes only (default)
   "all"    — every call; queue snapshot always included
 """
 import fcntl
 import json
+import os
 from datetime import datetime, timezone
+
+# Written once, when a log file is created.  Not JSON: readers of this
+# file skip lines that fail to parse (llmc log, scripts/fit_breaker_
+# params.py).  Kept as comments rather than an in-band JSON object so a
+# reader counting entries cannot mistake it for a call.
+_HEADER = (
+    "# llmclient call log — JSONL, one object per line.\n"
+    "# NOT a record of every call: at the default log level \"errors\"\n"
+    "# only non-success outcomes are written, so successful calls leave\n"
+    "# no trace here and the line count is a failure count, not a call\n"
+    "# count.  Use llmclient.configure(log_level=\"all\") to log every\n"
+    "# call.  Lines starting with # are not JSON; skip them.\n"
+)
 
 
 def write_log(cfg, operation: str, result, context: dict | None) -> None:
@@ -65,6 +87,12 @@ def write_log(cfg, operation: str, result, context: dict | None) -> None:
         with open(log_path, "a", encoding="utf-8") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             try:
+                # Size is checked under the lock, not at open(), so two
+                # processes racing to create the file cannot both write
+                # a header.  Append-only: an existing file never gains
+                # one retroactively.
+                if os.fstat(f.fileno()).st_size == 0:
+                    f.write(_HEADER)
                 f.write(line)
                 f.flush()
             finally:

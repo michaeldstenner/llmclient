@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import llmclient._config as config_mod
+import llmclient._log as _log_mod
 from llmclient._log import write_log
 from llmclient import EmbedResult, LLMResult
 from tests.conftest import make_cfg
@@ -54,7 +55,10 @@ def _log_file(tmp_path: Path) -> Path:
 
 
 def _read_entries(tmp_path: Path) -> list[dict]:
-    return [json.loads(l) for l in _log_file(tmp_path).read_text().splitlines() if l.strip()]
+    """Entries only — skips the "#" header, as every real reader does."""
+    return [json.loads(l)
+            for l in _log_file(tmp_path).read_text().splitlines()
+            if l.strip() and not l.startswith("#")]
 
 
 # ---------------------------------------------------------------------------
@@ -220,3 +224,67 @@ def test_embed_failure_logged_at_errors_level(tmp_path, monkeypatch):
     entries = _read_entries(tmp_path)
     assert len(entries) == 1
     assert entries[0]["outcome"] == "error:unreachable"
+
+
+# ---------------------------------------------------------------------------
+# Self-describing header
+#
+# At the default log level the file records only failures, so a reader who
+# counts lines reads a failure count as a call count.  A "#" header written
+# at file creation says so in-band.  It must be written exactly once, must
+# not be JSON, and must not survive into the entry stream of any reader.
+# ---------------------------------------------------------------------------
+
+def _raw_lines(tmp_path: Path) -> list[str]:
+    return _log_file(tmp_path).read_text().splitlines()
+
+
+def test_header_written_on_file_creation(tmp_path):
+    cfg = make_cfg(log_caller="app")
+    write_log(cfg, "call", _result(), None)
+    lines = _raw_lines(tmp_path)
+    assert lines[0].startswith("#")
+    assert "NOT a record of every call" in "\n".join(lines)
+    # ...and the entry still lands.
+    assert len(_read_entries(tmp_path)) == 1
+
+
+def test_header_written_only_once(tmp_path):
+    cfg = make_cfg(log_caller="app")
+    write_log(cfg, "call", _result(), None)
+    write_log(cfg, "call", _result(), None)
+    write_log(cfg, "call", _result(), None)
+    lines = _raw_lines(tmp_path)
+    assert sum(1 for l in lines if l.startswith("#")) == len(
+        [l for l in _log_mod._HEADER.splitlines() if l])
+    assert len(_read_entries(tmp_path)) == 3
+
+
+def test_header_not_prepended_to_existing_file(tmp_path):
+    """Append-only: a pre-existing log is never rewritten to gain a header."""
+    existing = _log_file(tmp_path)
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text('{"outcome": "timeout:generation"}\n')
+    cfg = make_cfg(log_caller="app")
+    write_log(cfg, "call", _result(), None)
+    lines = _raw_lines(tmp_path)
+    assert not lines[0].startswith("#")
+    assert len(lines) == 2
+
+
+def test_header_lines_are_not_json(tmp_path):
+    cfg = make_cfg(log_caller="app")
+    write_log(cfg, "call", _result(), None)
+    for line in _raw_lines(tmp_path):
+        if line.startswith("#"):
+            with pytest.raises(json.JSONDecodeError):
+                json.loads(line)
+
+
+def test_cli_log_reader_skips_header(tmp_path):
+    from llmclient.cli._log import _read_log
+    cfg = make_cfg(log_caller="app")
+    write_log(cfg, "call", _result(outcome="timeout:generation"), None)
+    entries = _read_log(_log_file(tmp_path))
+    assert len(entries) == 1
+    assert entries[0]["outcome"] == "timeout:generation"

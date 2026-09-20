@@ -202,15 +202,24 @@ All parameters are optional.
 shared keys stay in the global file; only app-specific values go in
 the app file.
 
-`data_dir` controls where `queue.db` and `llmclient_log.jsonl` live.
-Apps sharing a `data_dir` share both a queue and a log.  Apps that
-want independent Ollama slot budgets should each point at a separate
-directory.  Defaults to `~/.local/share/llmclient/`.
+`data_dir` controls where `llmclient_log.jsonl` lives — the log only.
+It no longer moves the slot queue: `queue.db` is deliberately shared
+across apps at `~/.local/state/llmclient/queue.db` so separate data
+homes cannot fork it and defeat slot coordination against one Ollama
+box.  Override the queue only to isolate deliberately (tests), via
+`queue_file`.  `data_dir` is legacy and superseded by `app`, which
+puts the log at `~/.local/share/<app>/`; with neither set it falls
+back to `~/.local/share/llmclient/`.
 
 `log_level`:
 - `"off"` — nothing logged
 - `"errors"` — non-success outcomes only (default)
 - `"all"` — every call; queue snapshot always included
+
+At the default `"errors"` level the log file is a **failure log, not
+a call log** — successful calls leave no trace, so its line count
+measures failures, never traffic.  Each log file carries a
+`#`-prefixed header stating this; readers must skip non-JSON lines.
 
 ### Viewing logs
 
